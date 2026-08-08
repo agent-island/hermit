@@ -1,0 +1,28 @@
+node_modules/
+.env
+.env.*
+!.env.example
+
+# Private lives, workspaces, credentials, and browser state.
+archive/
+data/
+link/
+auth/
+auth-*/
+pending-messages/
+
+# Generated databases and exports.
+*.db
+*.sqlite
+*.sqlite-*
+*.sqlite3
+life.html
+life.md
+
+# Local tooling.
+coverage/
+*.log
+.DS_Store
+.idea/
+.vscode/
+

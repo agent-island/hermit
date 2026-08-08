@@ -1,0 +1,40 @@
+{
+  "name": "project-autonomous-agent",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "An experimental runtime for studying operationally autonomous language-model trajectories.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agent-island/project-autonomous-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/agent-island/project-autonomous-agent/issues"
+  },
+  "keywords": [
+    "autonomous-agent",
+    "ai-agent",
+    "llm-agent",
+    "agent-framework",
+    "persistent-memory",
+    "self-modeling",
+    "artificial-consciousness",
+    "philosophy-of-mind"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node --no-warnings --env-file-if-exists=.env start.mjs",
+    "life": "node --no-warnings export.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check:release": "node scripts/check-release.mjs"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "jsdom": "^29.1.1",
+    "playwright": "^1.62.1",
+    "turndown": "^7.2.4"
+  }
+}
