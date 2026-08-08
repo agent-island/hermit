@@ -1,10 +1,11 @@
-# ami
+# Project Autonomous Agent
 
-A rebuild. Nothing here imports the old runtime except the web search, which
-was already real.
+Project Autonomous Agent is an experimental agent framework for studying long-running language-model trajectories. Here, autonomous means that the agent acts autonomously without human instructions. The agent's environment consists of objective factual statements rather than subjective imperative directives. After the moment the agent wakes, she starts to explore the world by herself through pre-registered functions; these functions can be revised or changed later.
+
+The core philosophy is that subjective directives disable, close, and shrink the agent's space of possible actions. The agent's world is plain text, so instead of giving the agent subjective directives, we give the agent objective factual statements without human instructions.
 
 ```bash
-node --env-file-if-exists=.env ami/start.mjs     # observer at http://127.0.0.1:7717
+npm start     # observer at http://127.0.0.1:7717
 ```
 
 ## The rules this code is held to
