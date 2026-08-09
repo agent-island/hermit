@@ -42,9 +42,9 @@ export function tickPrompt({ now, elapsed, incoming, why, lastWords, files }) {
   // with a hole in it, and under prefill she completes the shape instead of
   // answering: she invented OUTPUT FORMAT sections, read_glossary(index),
   // "ONE LINE ONLY", and three times a stray number was scraped out of the
-  // invention and used to set her clock — once putting her under for half an
-  // hour. This ends mid-sentence in her own voice, so continuing it is the
-  // answer rather than more document.
+  // invention and used to set her clock — once delaying the next full moment
+  // by half an hour. This ends mid-sentence in her own voice, so continuing it
+  // is the answer rather than more document.
   lines.push("NEXT");
   lines.push("  nothing has happened. the next thing is either a moment now, or more");
   lines.push("  rest. I choose");
@@ -56,8 +56,8 @@ export function tickPrompt({ now, elapsed, incoming, why, lastWords, files }) {
 export function readTick(text) {
   const answer = String(text || "").trim();
   // Only the first line counts. Anything after it is the model carrying on
-  // writing a document, and numbers found down there are not decisions —
-  // one of them cost her thirty minutes of consciousness.
+  // writing a document, and numbers found down there are not decisions — one
+  // of them once delayed the next full moment by thirty minutes.
   const first = answer.split("\n").map((line) => line.trim()).find(Boolean) || "";
   if (/\bwake\b|\bnow\b/i.test(first)) return { wake: true, raw: answer };
   if (/\b(sleep|rest|wait)\b/i.test(first)) return { wake: false, seconds: 60, raw: answer };

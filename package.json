@@ -17,10 +17,7 @@
     "ai-agent",
     "llm-agent",
     "agent-framework",
-    "persistent-memory",
-    "self-modeling",
-    "artificial-consciousness",
-    "philosophy-of-mind"
+    "persistent-memory"
   ],
   "engines": {
     "node": ">=22"
