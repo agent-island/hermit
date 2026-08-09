@@ -3,7 +3,6 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "An experimental runtime for studying operationally autonomous language-model trajectories.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -12,13 +11,6 @@
   "bugs": {
     "url": "https://github.com/agent-island/project-autonomous-agent/issues"
   },
-  "keywords": [
-    "autonomous-agent",
-    "ai-agent",
-    "llm-agent",
-    "agent-framework",
-    "persistent-memory"
-  ],
   "engines": {
     "node": ">=22"
   },

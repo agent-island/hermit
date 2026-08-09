@@ -1,8 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Project AA — Browser Reader",
+  "name": "Project AA",
   "version": "0.2.0",
-  "description": "Lets the local Project AA runtime collect Google results and read rendered web pages in a dedicated Chrome window.",
   "permissions": [
     "scripting",
     "alarms"
