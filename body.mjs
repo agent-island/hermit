@@ -2,13 +2,11 @@ import path from "node:path";
 import { readFileSync } from "node:fs";
 import { readdir, readFile, writeFile, mkdir, stat } from "node:fs/promises";
 import { search as webSearch, read as webRead } from "./browse.mjs";
-import { PLACEHOLDERS, loadSetup } from "./setup.mjs";
+import { loadSetup } from "./setup.mjs";
 import { write as writeLetter } from "./mail.mjs";
 import { loadRuntime, draw as drawRuntime } from "./runtime.mjs";
 import { isMemoryTransition } from "./memory-state.mjs";
 import { VOICE } from "./voice.mjs";
-
-const ALL_PLACEHOLDERS = Object.keys(PLACEHOLDERS);
 
 // One page of a captured source. Small enough that carrying it costs little,
 // large enough to be worth reading.

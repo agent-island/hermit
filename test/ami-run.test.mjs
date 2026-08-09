@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_RUN, loadRun, saveRun, runFields, describeRun } from "../run.mjs";
+import { loadRun, saveRun, runFields, describeRun } from "../run.mjs";
 import { buildRequest } from "../shapes.mjs";
 import { preparePrompt, ledgerFrom } from "../loop.mjs";
 import { projectPromptTokens, canCountExactly } from "../mind.mjs";

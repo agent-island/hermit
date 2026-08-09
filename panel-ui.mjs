@@ -12,7 +12,6 @@ export function renderPage({
   arrival,
   mind = {},
   letters = 0,
-  google = false,
   world = "",
   runtime = {},
   voice = {},
@@ -114,19 +113,6 @@ export function renderPage({
                 <button class="control" id="probe-model" type="button">Test compatibility</button>
                 <button class="control primary" id="save-model" type="button">Save</button>
                 <span id="probe-result" class="dim"></span>
-              </div>
-            </div>
-          </section>
-
-          <section class="panel-section">
-            <header><b>Search</b><span class="${google ? "good" : "dim"}"> · Google ${google ? "signed in" : "not signed in"}</span></header>
-            <div class="panel-body">
-              <p class="dim people-note">${google
-                ? "She searches Google, and every page she opens is converted to Markdown before she reads it."
-                : "Google refuses searches from this connection until an account is signed in. A browser window opens; type your password there, never here. It uses its own browser and never touches your Chrome."}</p>
-              <div class="actions">
-                <button class="control" id="link-google" type="button">${google ? "Sign in again" : "Sign in to Google"}</button>
-                <span id="google-result" class="dim"></span>
               </div>
             </div>
           </section>
@@ -317,21 +303,6 @@ document.getElementById("probe-model").onclick = async (event) => {
   } catch (error) {
     out.textContent = String(error.message);
     out.className = "problem";
-  }
-  event.target.disabled = false;
-};
-
-document.getElementById("link-google").onclick = async (event) => {
-  const out = document.getElementById("google-result");
-  event.target.disabled = true;
-  out.textContent = "a browser window is opening, one tab per account — sign in there, then come back";
-  try {
-    const result = await fetch("/browser/link", { method: "POST" }).then((response) => response.json());
-    out.textContent = result.note;
-    out.style.color = result.ok ? "var(--live)" : "var(--problem)";
-    if (result.ok) location.reload();
-  } catch (error) {
-    out.textContent = String(error.message);
   }
   event.target.disabled = false;
 };

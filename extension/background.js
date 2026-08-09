@@ -4,7 +4,6 @@
 const HOME = "http://127.0.0.1:7717";
 const BUILD = "0.2.0";
 let browserSessionToken = null;
-let followWindowId = null;
 let followTabId = null;
 let looping = false;
 
@@ -66,11 +65,9 @@ async function showPage(url) {
       return followTabId;
     } catch {
       followTabId = null;
-      followWindowId = null;
     }
   }
   const window = await chrome.windows.create({ url, focused: true, width: 1200, height: 860 });
-  followWindowId = window.id;
   followTabId = window.tabs?.[0]?.id ?? null;
   if (followTabId == null) throw new Error("Chrome did not create a readable tab");
   await waitForTab(followTabId);
@@ -179,7 +176,6 @@ chrome.runtime.onMessage.addListener((message, _sender, reply) => {
 chrome.tabs.onRemoved.addListener((id) => {
   if (id === followTabId) {
     followTabId = null;
-    followWindowId = null;
   }
 });
 

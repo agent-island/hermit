@@ -53,7 +53,7 @@ test("the extension does not widen her browser actions or website access", async
   assert.equal(manifest.host_permissions.includes("<all_urls>"), true);
 });
 
-test("search(query) uses an available extension result without launching Playwright", async () => {
+test("search(query) uses the Chrome extension result", async () => {
   const waiting = extensionSearch.next();
   const answer = browserSearch("current weather", { take: 1 });
   const { job } = await waiting;
@@ -67,5 +67,18 @@ test("search(query) uses an available extension result without launching Playwri
   assert.deepEqual(await answer, {
     query: "current weather",
     results: [{ title: "Weather", url: "https://example.com/weather", snippet: "Clear" }],
+  });
+
+  const nextWaiting = extensionSearch.next();
+  const nextAnswer = browserSearch("no result");
+  const { job: nextJob } = await nextWaiting;
+  extensionSearch.complete(nextJob.id, {
+    query: nextJob.query,
+    results: [],
+    note: "google returned nothing",
+  });
+  assert.deepEqual(await nextAnswer, {
+    query: "no result",
+    note: "google returned nothing",
   });
 });

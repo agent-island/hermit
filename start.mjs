@@ -9,7 +9,6 @@ import { configFromEnv, resolveContextTokens } from "./mind.mjs";
 import { loadModel } from "./model.mjs";
 import { loadRun, describeRun } from "./run.mjs";
 import { Observer, startPanel } from "./panel.mjs";
-import { close as closeBrowser } from "./browse.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = process.env.AMI_DATA || path.join(here, "data");
@@ -138,11 +137,10 @@ if (process.env.AMI_START_PAUSED === "1") {
 // the most: every restart during development threw a life away silently.
 let closing = false;
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, async () => {
+  process.on(signal, () => {
     if (closing) process.exit(0);
     closing = true;
     loop.stop();
-    await closeBrowser().catch(() => {});
     process.exit(0);
   });
 }

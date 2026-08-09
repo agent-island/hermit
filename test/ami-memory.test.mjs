@@ -6,7 +6,7 @@ import test from "node:test";
 import { Log } from "../log.mjs";
 import { Body } from "../body.mjs";
 import { Loop } from "../loop.mjs";
-import { DEFAULT_SETUP, DEFAULT_TEMPLATE, loadSetup } from "../setup.mjs";
+import { DEFAULT_SETUP, loadSetup } from "../setup.mjs";
 import { renderWorld } from "../world.mjs";
 
 async function withLog(run) {

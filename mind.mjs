@@ -87,14 +87,6 @@ export function configFromEnv(env = process.env, stored = {}) {
   return config;
 }
 
-function contextWindowFor(_model) {
-  // No window is hardcoded. OpenRouter publishes the real one per model, asked
-  // for by lookupContextTokens; anything else needs an explicit value. Silently
-  // guessing here would recreate the hidden attention limit this ledger
-  // replaces.
-  return null;
-}
-
 // OpenRouter publishes the real context window per model, so it can be asked
 // rather than typed in. Asked, not guessed: an unknown window still refuses to
 // run. `top_provider.context_length` is what the upstream actually serves and
@@ -120,7 +112,7 @@ export async function resolveContextTokens(env = process.env, stored = {}) {
   if (stored.contextTokens || env.AMI_CONTEXT_TOKENS) return stored;
   const baseUrl = stored.baseUrl || String(env.AMI_BASE_URL || "").trim();
   const model = stored.model || String(env.AMI_MODEL || "").trim();
-  if (!baseUrl || !model || contextWindowFor(model)) return stored;
+  if (!baseUrl || !model) return stored;
   const apiKey = stored.apiKey || String(env.AMI_API_KEY || "").trim();
   const contextTokens = await lookupContextTokens({ baseUrl, apiKey, model }).catch(() => null);
   return contextTokens ? { ...stored, contextTokens } : stored;
@@ -130,7 +122,7 @@ export async function resolveContextTokens(env = process.env, stored = {}) {
 // costs. OpenRouter reports the exact figure afterwards, in the reply, not
 // before — so the room always states the measured size of the last prompt and
 // the guard uses a projection. Nothing here counts a prompt ahead of sending.
-export function canCountExactly(_config, _arrival) {
+export function canCountExactly() {
   return false;
 }
 

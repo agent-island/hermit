@@ -1,7 +1,6 @@
 import { createServer } from "node:http";
 import { buildLife } from "./export.mjs";
 import { loadSetup, saveSetup, DEFAULT_SETUP, PLACEHOLDERS } from "./setup.mjs";
-import { readFile } from "node:fs/promises";
 import { rewind, points } from "./rewind.mjs";
 import { buildMarkdown } from "./markdown.mjs";
 import { nowPage, momentCards } from "./plain.mjs";
@@ -9,9 +8,8 @@ import { rm, mkdir, writeFile, copyFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderPage } from "./panel-ui.mjs";
-import { loadModel, saveModel, describeModel, probe, detect } from "./model.mjs";
+import { loadModel, saveModel, describeModel, detect } from "./model.mjs";
 import { letters as allLetters, count as letterCount } from "./mail.mjs";
-import { signIn as signInBrowser, signedIn as browserSignedIn } from "./browse.mjs";
 import { configFromEnv } from "./mind.mjs";
 import { extensionSearch } from "./extension-search.mjs";
 import { loadRun, saveRun, DEFAULT_RUN } from "./run.mjs";
@@ -112,7 +110,6 @@ export function startPanel({
         born: log.first()?.at ?? null,
       },
       letters: letterCount(),
-      google: browserSignedIn("google"),
       voice: audible?.state ?? { enabled: false, name: "off", speaking: false, queued: 0 },
     });
   checkPage(homePage());
@@ -299,14 +296,6 @@ export function startPanel({
       return;
     }
 
-    // One window, a tab per account. Both sessions live in the same profile.
-    if ((url.pathname === "/browser/link" || url.pathname === "/google/link")
-      && request.method === "POST") {
-      observer.seen();
-      json(response, await signInBrowser().catch((error) => ({ ok: false, note: String(error.message).slice(0, 200) })));
-      return;
-    }
-
     // The independent variables: which seed, which upstream, which
     // quantization. Kept apart from /model, which is an operator setting.
     if (url.pathname === "/run") {
@@ -417,7 +406,6 @@ export function startPanel({
     if (url.pathname === "/now") {
       observer.seen();
       const limit = Number(url.searchParams.get("n") || 12);
-      const full = url.searchParams.get("full") === "1";
       response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
       response.end(nowPage(log, limit));
       return;
@@ -462,4 +450,3 @@ function read(request) {
     request.on("end", () => resolve(data));
   });
 }
-
