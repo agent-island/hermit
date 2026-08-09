@@ -67,7 +67,7 @@ export function configFromEnv(env = process.env, stored = {}) {
   // a trailing assistant turn and gpt-oss-120b refuses it. Anthropic supported
   // assistant prefill for years and removed it in Claude 4.6. Use the panel's
   // detection, which asks the endpoint instead of assuming.
-  config.prefill = stored.prefill || prefillFlag(config.baseUrl);
+  config.prefill = (ADAPTERS[stored.prefill] ? stored.prefill : null) || prefillFlag(config.baseUrl);
   if (!config.endpoint) config.endpoint = config.prefill === "completions" ? "completions" : "prefix";
   // Nothing runs without prefill. The room has to arrive as an open turn she
   // continues; delivered any other way it is a question, and what answers a
@@ -193,8 +193,7 @@ function prefillFlag(baseUrl) {
   // documents this, and it is what anything permissive enough to end on an
   // assistant message will do — Groq's non-reasoning models and local servers
   // included. Detection in the panel overrides this anyway.
-  if (/openrouter\.ai/i.test(url)) return "assistant";
-  if (/anthropic\.com/i.test(url)) return "anthropic";
+  if (/openrouter\.ai/i.test(url)) return "bare";
   return null;
 }
 
@@ -205,8 +204,7 @@ export async function emit(config, world, arrival = config.endpoint, onCall = nu
   // which works and says plainly in the record that it was not prefill.
   // `arrival` is the intent chosen in the panel, not the name of a wire shape.
   // "prefix" means prefilled; which request shape does that is the endpoint's
-  // business, and config.prefill holds whichever one was detected — "assistant"
-  // for OpenRouter, "anthropic" for Claude's own API.
+  // business, and config.prefill holds whichever one was detected.
   const shape = arrival === "completions" ? "completions" : config.prefill;
   if (!ADAPTERS[shape]) {
     throw new Error(

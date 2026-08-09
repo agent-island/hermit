@@ -22,7 +22,7 @@ test("a seed that was never set is absent from the wire, not null", () => {
   assert.equal(run.seed, null);
   assert.deepEqual(runFields(run), {});
 
-  const body = buildRequest("assistant", {
+  const body = buildRequest("bare", {
     model: "m", text: "room", stop: [], temperature: 1, maxTokens: 10, run: runFields(run),
   });
   assert.equal("seed" in body, false);
@@ -40,7 +40,7 @@ test("run conditions reach the wire and the record", () => {
   // somewhere else, so setting a pin turns fallbacks off unless asked for.
   assert.equal(saved.allowFallbacks, false);
 
-  const body = buildRequest("assistant", {
+  const body = buildRequest("bare", {
     model: "m", text: "room", stop: [], temperature: 1, maxTokens: 10, run: runFields(saved),
   });
   assert.equal(body.seed, 7);
@@ -57,17 +57,8 @@ test("run conditions reach the wire and the record", () => {
   assert.deepEqual(loadRun(log), saved);
 });
 
-test("Anthropic never receives OpenRouter's provider field", () => {
-  const run = runFields({ seed: 3, provider: ["x"], allowFallbacks: false, quantizations: null });
-  const body = buildRequest("anthropic", {
-    model: "m", text: "room", stop: [], temperature: 1, maxTokens: 10, run,
-  });
-  assert.equal("provider" in body, false);
-  assert.equal("seed" in body, false);
-});
-
 test("the room states a measured token count or none at all", async () => {
-  const config = { contextTokens: 1000, maxTokens: 100, prefill: "assistant", endpoint: "prefix" };
+  const config = { contextTokens: 1000, maxTokens: 100, prefill: "bare", endpoint: "prefix" };
   assert.equal(canCountExactly(config, "prefix"), false);
 
   const rendered = [];
@@ -111,7 +102,7 @@ test("calibration survives a restart by being read back from the record", () => 
 });
 
 test("a prompt that cannot fit is refused rather than truncated", async () => {
-  const config = { contextTokens: 10, maxTokens: 100, prefill: "assistant", endpoint: "prefix" };
+  const config = { contextTokens: 10, maxTokens: 100, prefill: "bare", endpoint: "prefix" };
   await assert.rejects(
     preparePrompt({ config, arrival: "prefix", render: () => "x".repeat(10_000) }),
     /shelve or consolidate/,

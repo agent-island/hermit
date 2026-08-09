@@ -10,16 +10,26 @@ test("an OpenRouter endpoint arrives as the open assistant turn (prefill)", () =
     AMI_MODEL: "vendor/model",
     AMI_CONTEXT_TOKENS: "128000",
   });
-  assert.equal(config.prefill, "assistant");
+  assert.equal(config.prefill, "bare");
   assert.equal(config.endpoint, "prefix");
   assert.equal(config.contextTokens, 128_000);
+});
+
+test("an old saved dot-prefill setting cannot restore the user turn", () => {
+  const config = configFromEnv({
+    AMI_BASE_URL: "https://openrouter.ai/api/v1",
+    AMI_API_KEY: "test-key",
+    AMI_MODEL: "vendor/model",
+    AMI_CONTEXT_TOKENS: "128000",
+  }, { prefill: "assistant" });
+  assert.equal(config.prefill, "bare");
 });
 
 test("prompt ledger keeps all text, projects the cost, and sizes output from it", async () => {
   const prepared = await preparePrompt({
     config: {
       baseUrl: "https://openrouter.ai/api/v1", apiKey: "test-key",
-      model: "vendor/model", prefill: "assistant", contextTokens: 100, maxTokens: 80,
+      model: "vendor/model", prefill: "bare", contextTokens: 100, maxTokens: 80,
     },
     arrival: "prefix",
     history: "oldest active words\n",

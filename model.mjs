@@ -82,7 +82,7 @@ export async function probe({ baseUrl, apiKey, model, prefill }) {
     model,
     text: "one two three four five six seven",
     temperature: 0,
-    maxTokens: 64,
+    maxTokens: 256,
   });
 
   let response;
