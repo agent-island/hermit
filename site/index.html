@@ -3,27 +3,25 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Project Autonomous Agent — An Experimental Agent Framework</title>
-  <meta name="description" content="Project Autonomous Agent is an experimental framework for studying autonomous, long-running language-model trajectories in a world described through objective factual statements.">
-  <meta name="author" content="Project Autonomous Agent">
-  <meta name="theme-color" content="#f2efe7">
+  <title>Project Autonomous Agent</title>
+  <meta name="description" content="An experimental agent framework for studying autonomous, long-running language-model trajectories through objective factual statements.">
+  <meta name="theme-color" content="#fafafa">
   <link rel="canonical" href="https://agent-island.github.io/project-autonomous-agent/">
 
   <meta property="og:type" content="website">
-  <meta property="og:site_name" content="Project Autonomous Agent">
   <meta property="og:title" content="Project Autonomous Agent">
-  <meta property="og:description" content="An experimental agent framework for studying autonomous, long-running language-model trajectories.">
+  <meta property="og:description" content="An experimental framework for autonomous, long-running language-model trajectories.">
   <meta property="og:url" content="https://agent-island.github.io/project-autonomous-agent/">
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="Project Autonomous Agent">
-  <meta name="twitter:description" content="An experimental agent framework for studying autonomous, long-running language-model trajectories.">
+  <meta name="twitter:description" content="An experimental framework for autonomous, long-running language-model trajectories.">
 
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
     "@type": "SoftwareSourceCode",
     "name": "Project Autonomous Agent",
-    "description": "An experimental agent framework for studying autonomous, long-running language-model trajectories.",
+    "description": "An experimental agent framework for autonomous, long-running language-model trajectories.",
     "url": "https://agent-island.github.io/project-autonomous-agent/",
     "codeRepository": "https://github.com/agent-island/project-autonomous-agent",
     "programmingLanguage": "JavaScript",
@@ -34,213 +32,111 @@
   <style>
     :root {
       color-scheme: light;
-      --paper: #f2efe7;
-      --ink: #161614;
-      --muted: #66645e;
-      --line: #cbc7bc;
-      --accent: #d94d2b;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: Arial, Helvetica, sans-serif;
+      color: #111;
+      background: #fafafa;
     }
 
     * { box-sizing: border-box; }
 
-    html { scroll-behavior: smooth; }
-
     body {
-      margin: 0;
-      background: var(--paper);
-      color: var(--ink);
-      font-size: 16px;
-      line-height: 1.55;
-    }
-
-    a { color: inherit; }
-
-    .shell {
-      width: min(1180px, calc(100% - 40px));
+      width: min(720px, calc(100% - 40px));
+      min-height: 100vh;
       margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      font-size: 16px;
+      line-height: 1.65;
     }
 
-    header {
+    header, footer {
       display: flex;
-      align-items: center;
       justify-content: space-between;
-      min-height: 76px;
-      border-bottom: 1px solid var(--line);
+      padding: 24px 0;
+      font-size: 0.8rem;
     }
 
-    .mark {
-      font-size: 0.78rem;
-      font-weight: 750;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-    }
+    header a, footer a { color: inherit; }
 
-    nav { display: flex; gap: 22px; }
-
-    nav a {
-      color: var(--muted);
-      font-size: 0.88rem;
-      text-decoration: none;
-    }
-
-    nav a:hover, nav a:focus-visible { color: var(--ink); }
-
-    main {
-      min-height: calc(100vh - 76px);
-      display: grid;
-      align-content: center;
-      padding: 72px 0 54px;
-    }
-
-    .kicker {
-      margin: 0 0 18px;
-      color: var(--accent);
-      font-size: 0.76rem;
-      font-weight: 750;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-    }
-
-    h1 {
-      max-width: 980px;
-      margin: 0;
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(3.6rem, 10vw, 8.8rem);
-      font-weight: 400;
-      letter-spacing: -0.065em;
-      line-height: 0.83;
-    }
-
-    .statement {
-      display: grid;
-      grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.65fr);
-      gap: clamp(36px, 8vw, 110px);
-      align-items: end;
-      margin-top: clamp(52px, 9vw, 112px);
-      border-top: 1px solid var(--line);
-      padding-top: 28px;
-    }
-
-    .statement-copy {
-      max-width: 760px;
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(1.3rem, 2.4vw, 2rem);
-      line-height: 1.4;
-    }
-
-    .statement-copy p { margin: 0 0 1em; }
-    .statement-copy p:last-child { margin-bottom: 0; }
-
-    .facts {
-      margin: 0;
-      border-top: 1px solid var(--ink);
-    }
-
-    .facts div {
-      display: grid;
-      grid-template-columns: 88px 1fr;
-      gap: 16px;
-      padding: 12px 0;
-      border-bottom: 1px solid var(--line);
-    }
-
-    dt {
-      color: var(--muted);
-      font-size: 0.7rem;
-      font-weight: 750;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-
-    dd { margin: 0; font-size: 0.9rem; }
-
-    .links {
-      display: flex;
-      gap: 12px;
-      margin-top: 28px;
-    }
-
-    .button {
-      display: inline-flex;
-      align-items: center;
-      min-height: 42px;
-      padding: 0 17px;
-      border: 1px solid var(--ink);
-      font-size: 0.82rem;
+    .name {
       font-weight: 700;
       text-decoration: none;
     }
 
-    .button.primary { background: var(--ink); color: var(--paper); }
-    .button:hover, .button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 80px 0;
+    }
+
+    .label {
+      margin: 0 0 20px;
+      color: #707070;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    h1 {
+      max-width: 680px;
+      margin: 0 0 46px;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(3.2rem, 10vw, 6.2rem);
+      font-weight: 400;
+      letter-spacing: -0.055em;
+      line-height: 0.95;
+    }
+
+    .copy {
+      max-width: 620px;
+      font-size: 1.05rem;
+    }
+
+    .copy p { margin: 0 0 1.1em; }
+
+    .source {
+      width: fit-content;
+      margin-top: 20px;
+      color: inherit;
+      font-weight: 700;
+      text-underline-offset: 4px;
+    }
 
     footer {
-      display: flex;
-      justify-content: space-between;
-      gap: 20px;
-      padding: 18px 0 28px;
-      border-top: 1px solid var(--line);
-      color: var(--muted);
-      font-size: 0.74rem;
+      color: #707070;
+      border-top: 1px solid #ddd;
     }
 
-    @media (max-width: 760px) {
-      .shell { width: min(100% - 28px, 1180px); }
-      header { min-height: 64px; }
-      nav { gap: 14px; }
-      main { min-height: calc(100vh - 64px); padding-top: 58px; }
-      h1 { font-size: clamp(3.3rem, 18vw, 6rem); }
-      .statement { grid-template-columns: 1fr; }
-      .statement-copy { font-size: 1.25rem; }
-      footer { flex-direction: column; }
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      html { scroll-behavior: auto; }
+    @media (max-width: 520px) {
+      body { width: min(100% - 28px, 720px); }
+      main { padding: 64px 0; }
+      h1 { margin-bottom: 36px; }
     }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <header>
-      <div class="mark">Project AA</div>
-      <nav aria-label="Project links">
-        <a href="https://github.com/agent-island/project-autonomous-agent#readme">README</a>
-        <a href="https://github.com/agent-island/project-autonomous-agent">GitHub</a>
-      </nav>
-    </header>
+  <header>
+    <a class="name" href="./">Project AA</a>
+    <a href="https://github.com/agent-island/project-autonomous-agent">GitHub</a>
+  </header>
 
-    <main>
-      <p class="kicker">An experimental agent framework</p>
-      <h1>Project<br>Autonomous<br>Agent</h1>
+  <main>
+    <p class="label">Experimental agent framework</p>
+    <h1>Project Autonomous Agent</h1>
 
-      <section class="statement" aria-label="Project statement">
-        <div>
-          <div class="statement-copy">
-            <p>Project Autonomous Agent is an experimental agent framework for studying long-running language-model trajectories. Here, autonomous means that the agent acts autonomously without human instructions.</p>
-            <p>The agent's world is plain text. Instead of subjective imperative directives, the environment consists of objective factual statements. After waking, she starts to explore the world by herself through pre-registered functions.</p>
-          </div>
-          <div class="links">
-            <a class="button primary" href="https://github.com/agent-island/project-autonomous-agent">View source</a>
-            <a class="button" href="https://github.com/agent-island/project-autonomous-agent#readme">Read more</a>
-          </div>
-        </div>
+    <div class="copy">
+      <p>Project Autonomous Agent is an experimental agent framework for studying long-running language-model trajectories. Here, autonomous means that the agent acts autonomously without human instructions.</p>
+      <p>The agent's world is plain text. Instead of subjective imperative directives, the environment consists of objective factual statements. After waking, she starts to explore the world by herself through pre-registered functions.</p>
+    </div>
 
-        <dl class="facts">
-          <div><dt>World</dt><dd>Plain text</dd></div>
-          <div><dt>Context</dt><dd>Objective factual statements</dd></div>
-          <div><dt>Actions</dt><dd>Pre-registered functions</dd></div>
-          <div><dt>License</dt><dd>MIT</dd></div>
-        </dl>
-      </section>
-    </main>
+    <a class="source" href="https://github.com/agent-island/project-autonomous-agent">View source →</a>
+  </main>
 
-    <footer>
-      <span>Project Autonomous Agent</span>
-      <span>Open source under the MIT License</span>
-    </footer>
-  </div>
+  <footer>
+    <span>MIT License</span>
+    <span>2026</span>
+  </footer>
 </body>
 </html>
-
