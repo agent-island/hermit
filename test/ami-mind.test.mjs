@@ -15,6 +15,16 @@ test("an OpenRouter endpoint arrives as the open assistant turn (prefill)", () =
   assert.equal(config.contextTokens, 128_000);
 });
 
+test("GLM 5.2 is the default OpenRouter model", () => {
+  const config = configFromEnv({
+    AMI_BASE_URL: "https://openrouter.ai/api/v1",
+    AMI_API_KEY: "test-key",
+    AMI_CONTEXT_TOKENS: "1024000",
+  });
+  assert.equal(config.model, "z-ai/glm-5.2");
+  assert.equal(config.contextTokens, 1_024_000);
+});
+
 test("an old saved dot-prefill setting cannot restore the user turn", () => {
   const config = configFromEnv({
     AMI_BASE_URL: "https://openrouter.ai/api/v1",

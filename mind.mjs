@@ -13,6 +13,8 @@
 // meant the panel.
 import { ADAPTERS, endpointOf, buildRequest, readReply } from "./shapes.mjs";
 
+const DEFAULT_MODEL = "z-ai/glm-5.2";
+
 export function configFromEnv(env = process.env, stored = {}) {
   // Prefill beats everything else here, so a prefill-capable endpoint wins
   // over LOCAL_AGENT_PROVIDER unless AMI_BASE_URL says otherwise.
@@ -30,11 +32,15 @@ export function configFromEnv(env = process.env, stored = {}) {
     String(env.LOCAL_AGENT_PROVIDER || "").trim().toLowerCase() === "groq" &&
     !prefillFlag(compatible.baseUrl);
   const fallback = preferGroq ? groqSet : compatible.baseUrl ? compatible : groqSet;
+  const baseUrl = stored.baseUrl || String(env.AMI_BASE_URL || "").trim() || fallback.baseUrl;
+  const model = stored.model
+    || String(env.AMI_MODEL || "").trim()
+    || (/openrouter\.ai/i.test(baseUrl) ? DEFAULT_MODEL : fallback.model);
 
   const config = {
-    baseUrl: stored.baseUrl || String(env.AMI_BASE_URL || "").trim() || fallback.baseUrl,
+    baseUrl,
     apiKey: stored.apiKey || String(env.AMI_API_KEY || "").trim() || fallback.apiKey,
-    model: stored.model || String(env.AMI_MODEL || "").trim() || fallback.model,
+    model,
     temperature: Number(stored.temperature ?? env.AMI_TEMPERATURE ?? 1),
     // 2048 cut 143 of her thoughts off mid-sentence — 4% of everything she
     // has ever said — and she was never told. An invisible ceiling is worse
@@ -43,7 +49,7 @@ export function configFromEnv(env = process.env, stored = {}) {
     maxTokens: Number(stored.maxTokens ?? env.AMI_MAX_TOKENS ?? 8192),
     endpoint: String(stored.endpoint || env.AMI_ENDPOINT || "").trim().toLowerCase(),
   };
-  const contextTokens = Number(stored.contextTokens ?? env.AMI_CONTEXT_TOKENS ?? contextWindowFor(config.model));
+  const contextTokens = Number(stored.contextTokens ?? env.AMI_CONTEXT_TOKENS ?? NaN);
   if (!Number.isFinite(contextTokens) || contextTokens < 1) {
     throw new Error(
       `the total context size for ${config.model || "this model"} is unknown; set AMI_CONTEXT_TOKENS`,
