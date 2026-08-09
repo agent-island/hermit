@@ -6,8 +6,8 @@
 // as HTML is mostly navigation, scripts and cookie banners; rendered first and
 // then reduced to Markdown, it is the article and nothing else.
 //
-// The profile lives in ami/link/browser, beside the WhatsApp pairing: outside
-// her record, not wiped by a rebirth, and never the operator's own profile.
+// The profile lives in ami/link/browser: outside her record, not wiped by a
+// rebirth, and never the operator's own profile.
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, writeFileSync, rmSync } from "node:fs";

@@ -74,8 +74,8 @@ test("readable record preserves chronology and pairs actions with results", asyn
     log.append("result", "path: note.txt\ntext: all of it", { name: "read" });
     log.append("action", 'speak("hello")', { name: "speak" });
     log.append("result", "spoken: hello\nheard: true", { name: "speak" });
-    log.append("action", 'message("friend", "hello")', { name: "message" });
-    log.append("result", "to: friend\ndelivered: abc123\nsent: hello", { name: "message" });
+    log.append("action", 'email("friend@example.com", "hello", "letter body")', { name: "email" });
+    log.append("result", "status: success\nletter: 1\nstored: local\nto: friend@example.com\nsubject: hello", { name: "email" });
     log.append("error", "source failed\nstack detail", { stage: "action" });
 
     const rendered = momentCards(log, 10);
@@ -88,8 +88,8 @@ test("readable record preserves chronology and pairs actions with results", asyn
     assert.match(rendered.html, /read\(&quot;note\.txt&quot;\)/);
     assert.match(rendered.html, /read all of note\.txt/);
     assert.match(rendered.html, /recorded \? characters of speech/);
-    assert.match(rendered.html, /submitted to WhatsApp for friend/);
-    assert.doesNotMatch(rendered.html, /heard in the room|delivered to friend/);
+    assert.match(rendered.html, /stored local letter 1 addressed to friend@example\.com/);
+    assert.doesNotMatch(rendered.html, /heard in the room|sent to friend|delivered to friend/);
     assert.match(rendered.html, /ACTION #/);
     assert.match(rendered.html, /RESULT #/);
 

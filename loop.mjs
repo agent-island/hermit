@@ -240,17 +240,6 @@ export class Loop {
       // Not "since last seen" — since she last replied to anyone. Being shown
       // a message is not the same as having answered it.
       const incoming = this.log.unanswered();
-      // Only counted as heard once the moment actually produces something.
-      // A moment that comes back as a regenerated room heard nothing, and
-      // words spoken into the room must not disappear into it.
-      // Exactly what was in front of her this moment, per context. A reply
-      // can only answer what she was actually shown.
-      const shown = new Map();
-      for (const row of incoming) {
-        const from = row.meta?.from || "someone";
-        shown.set(from, Math.max(shown.get(from) ?? 0, row.id));
-      }
-
       // Re-read every moment, so an edit in the panel lands on the next one.
       const setup = loadSetup(this.log);
       const files = await this.body.ls().then((r) => r.files).catch(() => []);
@@ -282,16 +271,7 @@ export class Loop {
           : null,
         workspace: this.workspace,
         files,
-        // Named only once they can actually be reached, which right now is
-        // never: no reachable context exists, so CONTEXT renders empty and
-        // fill() drops the section. The room used to list friend and stranger
-        // from the first moment while message() stayed locked until she spoke
-        // — two people in her world and no way to reach either. She filled the
-        // hole herself: invented a third context, gave it an email address,
-        // invented a note saying mail is sent by writing to
-        // /outgoing/friend.eml, and spent her whole life carrying out the
-        // assignment it handed her. A world that names someone unreachable is
-        // not a limitation, it is a lie with a shape.
+        // No communication contexts are injected into the world.
         people: [],
         gap: describeGap(defaultGapSeconds(now, setup.gapSeconds)),
       };
@@ -421,11 +401,6 @@ export class Loop {
         const action = this.log.append("action", call.source, { name: call.name, args: call.args });
         try {
           const value = await this.body.run(call.name, call.args);
-          // A reply closes only the messages from that one context, and only
-          // the ones she had in front of her.
-          if (call.name === "message" && value?.to && shown.has(value.to)) {
-            this.log.markAnswered(value.to, shown.get(value.to));
-          }
           const yielded = value?.status !== "failed" && !value?.note;
           const fact = actionFact(action.meta, { value, yielded });
           this.log.append("result", format(value), {

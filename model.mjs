@@ -1,7 +1,7 @@
 // Which mind she is, set from the panel instead of a text file.
 //
-// This is kept in its own file beside the WhatsApp pairing, deliberately not in
-// her record. Everything in the record is archived on every rebirth and
+// This is kept in its own local file, deliberately outside her record.
+// Everything in the record is archived on every rebirth and
 // exported to html, markdown, sqlite and json — a key stored there would be
 // copied into every one of those, and the archives are the part people share.
 // It is also not hers to see: nothing here ever reaches the room.

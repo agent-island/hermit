@@ -3,6 +3,8 @@
 // The runtime and the panel's detector both read this, so what gets tested is
 // exactly what gets used. They used to be written twice and drifted, sending
 // one provider's fields to another and misreporting what could prefill.
+// Some chat-compatible APIs call their request array `messages`; that is only
+// the provider's wire format for assistant prefill, not a communication tool.
 //
 // Ordered best first, and "best" means least like being spoken to. A bare
 // document has nobody in it. A prefilled turn has nobody addressing her. A

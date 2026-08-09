@@ -589,14 +589,6 @@ function modelResultContent(unit) {
       characters: Number(raw.characters) || String(args[2] || "").trim().length,
     });
   }
-  if (name === "message") {
-    return formatModelResult({
-      status: "success",
-      to: raw.to || args[0] || "",
-      ...(raw.messageId || raw.delivered ? { messageId: raw.messageId || raw.delivered } : {}),
-      characters: Number(raw.characters) || String(args[1] || raw.sent || "").trim().length,
-    });
-  }
   if (name === "forget") {
     return formatModelResult({
       status: "success",

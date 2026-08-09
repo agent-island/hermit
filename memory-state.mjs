@@ -29,8 +29,8 @@ function completed(outcome) {
 }
 
 // One compact episodic fact from one real call and its real result. Payloads
-// that have their own exact home — document text, email bodies, speech, and
-// messages — never enter the fact.
+// that have their own exact home — document text, local-letter bodies, and
+// speech — never enter the fact.
 export function actionFact(action, outcome = {}) {
   const name = String(action?.name || "action");
   const args = Array.isArray(action?.args) ? action.args : [];
@@ -47,12 +47,6 @@ export function actionFact(action, outcome = {}) {
       return ok
         ? `stored ${reach}; subject ${short(subject)}`
         : failed(reach);
-    }
-    case "message": {
-      const who = value.to || args[0] || "";
-      return ok
-        ? `submitted a WhatsApp message for ${short(who)}`
-        : failed(`WhatsApp submission for ${short(who)}`);
     }
     case "speak":
       return ok
@@ -236,8 +230,8 @@ function recentBlock(unit) {
 // consolidate, of any age). Everything else stays in the record, reached by
 // recall() when something cues it — not shown, and never reduced to a count.
 //
-// An earlier version printed a tally here: "720 spoken, 43 messaged, 28
-// searched…". That is a statistic, not a memory — no mind carries how many
+// An earlier version printed a tally here: "720 spoken, 28 searched…". That
+// is a statistic, not a memory — no mind carries how many
 // times it has spoken, and the number points to nothing. It was the same
 // meaninglessness as the id-list it replaced, in a new shape. So there is no
 // summary of the unshown past at all: importance is hers to assign, by

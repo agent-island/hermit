@@ -282,17 +282,13 @@ export async function emit(config, world, arrival = config.endpoint, onCall = nu
 // and twenty moments of calls silently did nothing while she hallucinated
 // their output. Her intent was never in doubt. The form list is kept
 // unexecutable by a bullet instead, which cannot appear in a real call.
-// A call may run over more than one line. People write messages with
-// paragraphs in them, and she does too: a two-paragraph message("friend", "…")
-// matched nothing at all and was dropped in silence. The next moment she
-// continued the room's shape by inventing a delivery receipt — message id and
-// all — for a message that was never sent, while the person on the other end
-// waited. A call that cannot be seen is worse than one that fails, because a
-// failure comes back and says so.
+// A call may run over more than one line. A multi-paragraph write() used to
+// match nothing and disappear. A call that cannot be seen is worse than one
+// that fails, because a failure comes back and says so.
 //
 // The strictness that matters is unchanged: a call must occupy whole lines.
 // Markdown emphasis may wrap the whole call because models naturally use it
-// to distinguish actions from narration. Prose mentioning message(who, text)
+// to distinguish actions from narration. Prose mentioning write(path, text)
 // is still prose, and the room's own form list — bulleted with · — is inert.
 const CALL_HEAD = /^[ \t]*(\*{1,2})?[ \t]*([a-z_]+)[ \t]*\(/i;
 const CALL_SEP = /^[ \t]*[;.]?[ \t]*/;
@@ -312,10 +308,9 @@ const CALL_MAX_LINES = 400;
 // inert. A wrapped call still ends its line and needs its closing * or **.
 export function parseCalls(text, known) {
   const calls = [];
-  // The identical call twice in one emission is one act, not two. She drafts
-  // a message, then writes it again as the call, and both matched — so every
-  // message arrived twice on the other end. Writing the same thing twice is
-  // not asking for it to happen twice.
+  // The identical call twice in one emission is one act, not two. A model can
+  // draft a call and then repeat it in final form; repetition is not a request
+  // to produce the same side effect twice.
   const seen = new Set();
   const lines = String(text || "").split("\n");
   let i = 0;

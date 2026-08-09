@@ -131,12 +131,9 @@ function renderCall(event, time) {
   const exactAction = exactEvent(action);
   const exactResult = result ? exactEvent(result) : "no result was recorded";
 
-  if (name === "speak" || name === "message") {
-    const args = splitArgs(action.content);
-    const who = name === "message" ? args.shift() : null;
-    const words = args.join(" ");
-    const label = name === "message" ? `message to ${who || "someone"}` : "spoke";
-    return row(time, "spoke", label,
+  if (name === "speak") {
+    const words = splitArgs(action.content).join(" ");
+    return row(time, "spoke", "spoke",
       `<span class="readable speech">“${escape(words)}”</span>
        <span class="exact">${exactAction}</span>`,
       `<span class="readable">${result ? escape(outcome(name, result.content)) : "no result was recorded"}</span>
@@ -257,7 +254,6 @@ function outcome(name, result) {
     case "sleep": return field("until") ? `until ${field("until")}` : firstLine(text);
     case "speak": return `recorded ${field("characters") || "?"} characters of speech`;
     case "email": return `stored local letter ${field("letter") || ""} addressed to ${field("to") || "the address"}`;
-    case "message": return `submitted to WhatsApp for ${field("to") || "the context"}`;
     default: return firstLine(text);
   }
 }
