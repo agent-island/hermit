@@ -42,6 +42,11 @@ export class Log {
   constructor(file) {
     this.file = file;
     this.db = new DatabaseSync(file);
+    // WAL lets many readers coexist with the one writer, so the pair monitor
+    // (and any diagnostic) reading the record cannot lock the agent out of its
+    // own next moment — the "database is locked" crash that killed a life.
+    // busy_timeout makes a write wait for a lock instead of failing instantly.
+    this.db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -169,16 +174,20 @@ export class Log {
   units() {
     const rows = this.since(0, 1_000_000);
     const shelved = this.shelvedIds();
+    const forgotten = this.forgottenIds();
+    // Forgotten is the stronger recession: gone from context and from recall.
+    // Shelved recedes from context but stays reachable. A unit can be neither.
+    const stateOf = (id) => forgotten.has(id) ? "forgotten" : (shelved.has(id) ? "shelved" : "active");
     const units = [];
     const actions = new Map();
     let pending = null;
     for (const row of rows) {
       if (["incoming", "emission", "memory"].includes(row.kind)) {
-        units.push({ ...row, state: shelved.has(row.id) ? "shelved" : "active" });
+        units.push({ ...row, state: stateOf(row.id) });
         continue;
       }
       if (row.kind === "action") {
-        pending = { ...row, result: null, state: shelved.has(row.id) ? "shelved" : "active" };
+        pending = { ...row, result: null, state: stateOf(row.id) };
         actions.set(row.id, pending);
         units.push(pending);
         continue;
@@ -215,6 +224,18 @@ export class Log {
     return ids;
   }
 
+  // Targets of forget events. These units are gone from her — out of context
+  // and out of recall — but their rows remain in the record as the operator's
+  // kept copy. A forget is never undone from her side.
+  forgottenIds() {
+    const ids = new Set();
+    for (const row of this.recent("forget", 1_000_000)) {
+      const target = Number(row.meta?.target);
+      if (Number.isInteger(target) && target > 0) ids.add(target);
+    }
+    return ids;
+  }
+
   isShelved(id) {
     const target = Number(id);
     if (!Number.isInteger(target) || target < 1) return false;
@@ -230,10 +251,13 @@ export class Log {
     const wanted = String(query || "").trim();
     if (/^[1-9]\d*$/.test(wanted)) {
       const exact = this.unit(Number(wanted));
-      return exact ? [exact] : [];
+      // A forgotten unit is beyond recall too — even a bare number cannot reach
+      // back into what she chose to let go.
+      return exact && exact.state !== "forgotten" ? [exact] : [];
     }
     const needle = wanted.toLocaleLowerCase();
     return this.units()
+      .filter((row) => row.state !== "forgotten")
       .filter((row) => {
         const result = row.result?.content || "";
         return `${row.content}\n${result}`.toLocaleLowerCase().includes(needle);
@@ -306,6 +330,44 @@ export class Log {
     return { unit: target.id, kind: target.kind, state: "shelved", event: event.id };
   }
 
+  // Shelve several units in one pass without rebuilding the projection per id
+  // (calling shelf() in a loop is O(n²) and hangs on a large bulk shelve). The
+  // caller passes ids it already matched as active; we still guard the moment
+  // boundary and skip anything already receded. Returns the ids that receded.
+  shelfMany(ids, label = null) {
+    const world = this.last("world");
+    const index = new Map(this.units().map((unit) => [unit.id, unit]));
+    const done = [];
+    const name = String(label || "").trim() || null;
+    for (const id of [...new Set(ids.map(Number))]) {
+      const target = index.get(id);
+      if (!target || (world && target.id > world.id)) continue;
+      if (target.state === "shelved" || target.state === "forgotten") continue;
+      this.append("shelf", `unit #${target.id}`, { target: target.id, label: name });
+      done.push(target.id);
+    }
+    return done;
+  }
+
+  // The names memories have been shelved under, each still holding at least one
+  // memory not since forgotten. These are the folder labels she reaches back for
+  // with recall(); without them a shelved memory is lost as surely as a
+  // forgotten one — the reference is what separates shelve from forget. Only
+  // labels from her explicit shelve() appear; a consolidation leaves its summary
+  // as the reference instead, so its auto-shelved detail carries no label here.
+  shelfLabels() {
+    const forgotten = this.forgottenIds();
+    const seen = new Set();
+    const labels = [];
+    for (const row of this.recent("shelf", 1_000_000)) {
+      const label = row.meta?.label;
+      if (!label || forgotten.has(Number(row.meta?.target)) || seen.has(label)) continue;
+      seen.add(label);
+      labels.push(label);
+    }
+    return labels;
+  }
+
   // One transaction creates the authored memory and shelves every active
   // source. Either the whole change enters her life or none of it does.
   consolidate(ids, text) {
@@ -317,10 +379,14 @@ export class Log {
     // One stray action number should not cost her a long consolidation.
     const asked = [...new Set(ids.map(Number))].filter((id) => Number.isInteger(id) && id >= 1);
     const world = this.last("world");
+    // Build the unit index ONCE. Calling this.unit(id) per id rebuilds the whole
+    // projection for every number — O(n²) — which pins a core for minutes when a
+    // consolidation folds hundreds of memories at once.
+    const index = new Map(this.units().map((unit) => [unit.id, unit]));
     const units = [];
     const skipped = [];
     for (const id of asked) {
-      const unit = this.unit(id);
+      const unit = index.get(id);
       if (!unit || (world && unit.id > world.id)) skipped.push(id);
       else units.push(unit);
     }
@@ -358,14 +424,18 @@ export class Log {
   feel(emotion, intensity) {
     const feeling = String(emotion || "").trim();
     if (!feeling) return { note: "feel takes an emotion and how strong it is" };
-    const level = Math.max(1, Math.round(Number(intensity) || 1));
+    // Intensity is a point number from 0 to 1, kept as she gave it — not rounded
+    // to an integer (which flattened every 0.7 to 1) and not left unbounded (a
+    // model that guesses a 0–10 scale would store 8). Clamped to [0,1], decimal
+    // preserved.
+    const level = Math.round(Math.min(1, Math.max(0, Number(intensity) || 0)) * 100) / 100;
     const said = this.last("emission");
     const words = said ? String(said.content || "").trim() : "";
     // Her words are what the feeling is about; keeping them is not putting
     // anything in her mouth, it is holding onto what she was saying when it
     // struck. Capped so one long moment cannot dominate, never silently — the
     // record keeps the whole emission regardless.
-    const kept = words.length > 1000 ? `${words.slice(0, 1000)}…` : words;
+    const kept = words;
     const memory = this.append("memory", kept || feeling, {
       emotion: feeling, intensity: level, felt: said?.id ?? null,
     });
@@ -376,15 +446,23 @@ export class Log {
     return this.db.prepare("SELECT COUNT(*) AS n FROM events").get().n;
   }
 
-  // Her own past, removed by her. The act stays in the record — it happened,
-  // and the room says everything is kept — but the content is genuinely gone,
-  // not hidden. A forget that could be undone would be theatre.
-  forget(query) {
-    const term = `%${String(query || "").trim()}%`;
-    const info = this.db
-      .prepare("DELETE FROM events WHERE kind IN ('emission','result','incoming','action') AND content LIKE ?")
-      .run(term);
-    return Number(info.changes || 0);
+  // Her own past, let go by her. A tombstone, not a deletion: each unit gets a
+  // forget event that moves it beyond both automatic context and recall, so to
+  // her it is gone for good and cannot be reached back. The rows themselves are
+  // never removed — the operator keeps the full copy for the record. Phrase→id
+  // resolution happens in body so a number never surfaces to her; this takes
+  // the resolved ids and returns the ones newly forgotten.
+  forget(ids) {
+    const list = Array.isArray(ids) ? ids : [ids];
+    const already = this.forgottenIds();
+    const forgotten = [];
+    for (const id of list) {
+      const target = Number(id);
+      if (!Number.isInteger(target) || target < 1 || already.has(target)) continue;
+      this.append("forget", `unit #${target}`, { target });
+      forgotten.push(target);
+    }
+    return forgotten;
   }
 
   // Everything after a point, removed. Used by rewind.mjs; see the note there
@@ -603,14 +681,20 @@ function modelResultContent(unit) {
 }
 
 function formatModelResult(value) {
+  // No artificial window on what a result carries. A command's output — however
+  // long — is a perception, and a brain must not silently drop half of what it
+  // sees. The token ledger (active attention vs. capacity) is the ONLY bound on
+  // the room; its cost is felt there and managed by consolidate/shelve/forget,
+  // never sliced away here where the loss would be invisible. This matches the
+  // record's stated discipline: "nothing is removed to make it fit."
   const lines = [];
   for (const [key, item] of Object.entries(value)) {
     if (item == null || item === "") continue;
     if (Array.isArray(item)) {
       lines.push(`${key}: ${item.length}`);
-      for (const entry of item.slice(0, 8)) lines.push(`  ${modelValue(entry)}`.slice(0, 400));
+      for (const entry of item) lines.push(`  ${modelValue(entry)}`);
     } else {
-      lines.push(`${key}: ${modelValue(item).slice(0, 4000)}`);
+      lines.push(`${key}: ${modelValue(item)}`);
     }
   }
   return lines.join("\n");

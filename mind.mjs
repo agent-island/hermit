@@ -45,8 +45,23 @@ export function configFromEnv(env = process.env, stored = {}) {
     // 2048 cut 143 of her thoughts off mid-sentence — 4% of everything she
     // has ever said — and she was never told. An invisible ceiling is worse
     // than a stated one: she cannot even work around it. Output is only ~9%
-    // of what a moment costs, so this is close to free.
-    maxTokens: Number(stored.maxTokens ?? env.AMI_MAX_TOKENS ?? 8192),
+    // of what a moment costs, so this is close to free. 8192 still severed a
+    // reasoning model's longer thoughts — its chain of thought is counted as
+    // output too — always with the full budget available, never near the wall.
+    // So the ceiling is the model's own maximum (65536 here): a thought is
+    // never cut by us, only by what the model itself can produce, and paid for
+    // only on the rare thought that runs that long. She manages her own memory
+    // with consolidate/shelve/forget; we impose no limit of our own but context.
+    maxTokens: Number(stored.maxTokens ?? env.AMI_MAX_TOKENS ?? 65536),
+    // Reasoning effort, when the model supports it. Not a stored field (loadModel
+    // strips it), so the environment controls it cleanly — no repeat of the
+    // model/temperature override trap. AMI_REASONING_EFFORT=high|medium|low|off.
+    reasoning: (() => {
+      const e = String(env.AMI_REASONING_EFFORT || "").trim().toLowerCase();
+      if (!e) return null;
+      if (e === "off" || e === "none" || e === "false") return { enabled: false };
+      return { effort: e };
+    })(),
     endpoint: String(stored.endpoint || env.AMI_ENDPOINT || "").trim().toLowerCase(),
   };
   const contextTokens = Number(stored.contextTokens ?? env.AMI_CONTEXT_TOKENS ?? NaN);
@@ -225,6 +240,7 @@ export async function emit(config, world, arrival = config.endpoint, onCall = nu
     stop: STOP,
     temperature: config.temperature,
     maxTokens: config.maxTokens,
+    reasoning: config.reasoning,
     run: config.run,
   });
 
@@ -288,7 +304,7 @@ export async function emit(config, world, arrival = config.endpoint, onCall = nu
 // is still prose, and the room's own form list — bulleted with · — is inert.
 const CALL_HEAD = /^[ \t]*(\*{1,2})?[ \t]*([a-z_]+)[ \t]*\(/i;
 const CALL_SEP = /^[ \t]*[;.]?[ \t]*/;
-const CALL_MAX_LINES = 400;
+const CALL_MAX_LINES = Infinity;
 
 // A cursor walks the text, not just the lines, because she does not always give
 // one call a line of its own. glm-5.2 in particular runs them together —
@@ -326,7 +342,9 @@ export function parseCalls(text, known) {
     const wrapper = head[1] || "";
     const name = head[2].toLowerCase();
     const from = col + head[0].length;
-    const close = closingOf(lines, i, from, wrapper);
+    // Strict first; if an unescaped quote in her argument broke the balance,
+    // rescue it by balancing brackets alone rather than dropping the call.
+    const close = closingOf(lines, i, from, wrapper) || closingOf(lines, i, from, wrapper, true);
     if (!close) { i += 1; col = 0; continue; }
     const inner = close.line === i
       ? lines[i].slice(from, close.at)
@@ -355,7 +373,13 @@ export function parseCalls(text, known) {
 // Where this call's opening bracket closes, quote-aware, across lines. Null if
 // it never closes, or if it closes somewhere other than the end of a line —
 // which means the text was never a call to begin with.
-function closingOf(lines, start, from, wrapper = "") {
+// `ignoreQuotes` is the rescue pass. The strict pass tracks quotes so a ")"
+// inside a string does not close the call — but her argument sometimes carries
+// an unescaped quote (the '"'"' idiom for an apostrophe in a shell command),
+// which closes the string early and leaves the brackets unbalanced, so the whole
+// call is lost. Balancing brackets alone, ignoring the quotes that confused us,
+// finds the true close; bash reads the '"'"' idiom raw, so the rescued call runs.
+function closingOf(lines, start, from, wrapper = "", ignoreQuotes = false) {
   let depth = 1;
   let quote = null;
   let escaped = false;
@@ -363,13 +387,13 @@ function closingOf(lines, start, from, wrapper = "") {
     const text = lines[line];
     for (let at = line === start ? from : 0; at < text.length; at += 1) {
       const char = text[at];
-      if (quote) {
+      if (!ignoreQuotes && quote) {
         if (escaped) escaped = false;
         else if (char === "\\") escaped = true;
         else if (char === quote) quote = null;
         continue;
       }
-      if (char === '"' || char === "'" || char === "`") {
+      if (!ignoreQuotes && (char === '"' || char === "'" || char === "`")) {
         quote = char;
         continue;
       }
@@ -466,18 +490,28 @@ function parseArgs(raw) {
     // One argument and unparseable: take the first quoted run if there is
     // one, so a stray quote later in the text cannot swallow the whole call.
     const first = normalized.match(/^\s*(["'`])([\s\S]*?)\1\s*$/);
-    return [first ? first[2] : unquote(normalized)];
+    return [first ? unescape(first[2]) : unquote(normalized)];
   }
 }
 
 // Best-effort recovery of a value the model wrote as text rather than JSON.
+// Decode the escape sequences a JSON string would, so a value that fell out of
+// JSON.parse (an unescaped quote or a real newline elsewhere made the whole
+// array invalid) still reads its `\n`, `\t`, `\"` as the model meant them. A
+// run("cat <<'EOF'\n…\nEOF") whose `\n` survived as the two characters
+// backslash-n reaches bash, which reads `\n` as the letter n — so the heredoc
+// delimiter `EOF\n#!` became `EOFn#!` and every here-doc and file write died.
+// Unknown escapes (a shell regex's \d, \.) keep their backslash untouched, and
+// a doubled backslash \\ collapses to one before its follower is read.
+function unescape(text) {
+  const map = { n: "\n", t: "\t", r: "\r", '"': '"', "'": "'", "`": "`", "\\": "\\", "/": "/", "0": "\0" };
+  return String(text).replace(/\\([\s\S])/g, (whole, char) => (char in map ? map[char] : whole));
+}
+
 function unquote(text) {
   const value = String(text).trim();
   const quoted = value.match(/^(["'`])([\s\S]*)\1$/);
-  return (quoted ? quoted[2] : value)
-    .replace(/\\n/g, "\n")
-    .replace(/\\t/g, "\t")
-    .replace(/\\"/g, '"');
+  return unescape(quoted ? quoted[2] : value);
 }
 
 function splitTopLevel(text) {

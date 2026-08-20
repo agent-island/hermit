@@ -3,8 +3,8 @@
 // factually and which units currently follow. No importance, motive, or
 // interpretation is inferred here.
 
-const FACT_TEXT_LIMIT = 180;
-const MEMORY_TRANSITIONS = new Set(["recall", "shelve", "consolidate", "feel"]);
+const FACT_TEXT_LIMIT = Infinity;
+const MEMORY_TRANSITIONS = new Set(["recall", "shelve", "consolidate", "feel", "forget"]);
 
 // These actions already persist as the transition they cause. Giving shelf()
 // a second active episode would replace every shelved unit with a memory of
@@ -81,12 +81,12 @@ export function actionFact(action, outcome = {}) {
         : failed(`recall of ${short(args[0] || "")}`);
     case "shelve": {
       // Named by the words she used, never by the number underneath. The unit
-      // number stays in the record for the shelf event; it does not belong in
-      // the sentence she reads back.
+      // numbers stay in the record for the shelf events; they do not belong in
+      // the sentence she reads back. One phrase may let several memories recede.
+      const count = Number(value.count);
       const phrase = String(args[0] ?? "").replace(/\s+/g, " ").trim();
-      return ok
-        ? `let ${phrase ? short(phrase) : "a memory"} recede`
-        : failed("letting a memory recede");
+      const many = Number.isFinite(count) && count > 1 ? `${count} memories about ${phrase ? short(phrase) : "it"}` : (phrase ? short(phrase) : "a memory");
+      return ok ? `let ${many} recede, still recallable` : failed("letting memory recede");
     }
     case "consolidate": {
       const kept = Number(value.kept);
@@ -104,10 +104,30 @@ export function actionFact(action, outcome = {}) {
         : failed("sleep");
     case "ls":
       return ok ? `listed the workspace (${Array.isArray(value.files) ? value.files.length : 0} files)` : failed("workspace listing");
-    case "forget":
+    case "forget": {
+      const count = Number(value.count ?? value.removed ?? 0);
+      const phrase = short(args[0] || "");
       return ok
-        ? `deleted ${Number(value.removed || 0)} entries matching ${short(value.query || args[0] || "")} from the current record`
-        : failed("deletion from the current record");
+        ? `let ${count ? `${count} ` : ""}memor${count === 1 ? "y" : "ies"} about ${phrase} go for good; they can no longer be recalled`
+        : failed("letting memory go");
+    }
+    case "run": {
+      // A real fact, not a paraphrase. Every part below is copied or counted
+      // straight from the actual output bytes — the command she ran, how many
+      // non-empty lines came back, how many characters (the true total even if
+      // the room only showed part), and the FIRST non-empty line verbatim. No
+      // interpretation, so it can never claim something the output did not say.
+      // The whole output stays in the record; recall() returns it in full. This
+      // only stops her memory of a command from collapsing to "run completed".
+      const cmd = short(args[0] ?? "");
+      if (!ok) return `ran ${cmd} — ${note || "it did not complete"}`;
+      const out = typeof value.output === "string" ? value.output : "";
+      const chars = Number.isFinite(Number(value.of)) ? Number(value.of) : out.length;
+      const lines = out.split("\n").filter((line) => line.trim());
+      if (!lines.length) return `ran ${cmd} → no output`;
+      const first = short(lines[0].trim());
+      return `ran ${cmd} → ${lines.length} line${lines.length === 1 ? "" : "s"}, ${chars} chars; first line ${first}`;
+    }
     case "end":
       return ok && value.ended ? "ended this life" : failed("ending this life");
     default:
@@ -169,6 +189,15 @@ export function transitionMemory(state, event) {
     const unit = next.units.get(id);
     if (unit) next.units.set(id, { ...unit, state: "shelved", by: event.meta?.by || null });
   }
+  // Forgetting is a stronger recession than shelving: the unit leaves both
+  // automatic context and recall's reach. The row is never removed — a copy is
+  // kept for the operator's record — but to her it is gone for good. Forgotten
+  // wins over shelved, so a shelved unit can still be forgotten later.
+  if (event.kind === "forget") {
+    const id = Number(event.meta?.target);
+    const unit = next.units.get(id);
+    if (unit) next.units.set(id, { ...unit, state: "forgotten", by: event.meta?.by || null });
+  }
   return next;
 }
 
@@ -187,8 +216,10 @@ export function followingState(state) {
 // characters)" — a wall of meaningless ids pinned at "remains: 0", the words
 // themselves thrown away. What survived was the metadata; what mattered was
 // gone. This shows the words and folds the rest.
-const RECENT_WINDOW = 16;
-const SAID_LIMIT = 260;
+// No artificial window on how many recent actions she carries — every active
+// one is shown until she folds it away with consolidate/shelve/forget. Her
+// tools are the memory management; context is the only wall.
+const RECENT_WINDOW = Infinity;
 
 // A folded narrative reads as what it is: a short account, in prose. The
 // source ids that produced it are kept in meta for recall() and audit, but
@@ -218,7 +249,7 @@ function recentBlock(unit) {
   if (unit.meta?.name === "speak") {
     const said = String(unit.meta?.args?.[0] ?? "").replace(/\s+/g, " ").trim();
     if (said) {
-      const shown = said.length > SAID_LIMIT ? `${said.slice(0, SAID_LIMIT)}…` : said;
+      const shown = said;
       return [`said: ${shown}`];
     }
   }
@@ -238,15 +269,22 @@ function recentBlock(unit) {
 // consolidating what mattered or writing it to a file (which the WORKSPACE
 // list then carries as "I have this"), and what she does not keep simply rests
 // in the record until recalled.
-export function projectMemory(units, attention = {}) {
+export function projectMemory(units, attention = {}, shelved = []) {
   const memories = units.filter((unit) => unit.kind === "memory");
   const actions = units.filter((unit) => unit.kind !== "memory");
   const recent = actions.slice(-RECENT_WINDOW);
+  const folders = Array.isArray(shelved) ? shelved.filter(Boolean) : [];
 
   const hasLedger = Number.isFinite(Number(attention.maintained))
     && Number.isFinite(Number(attention.capacity));
   const maintained = Math.max(0, Math.floor(Number(attention.maintained) || 0));
   const capacity = Math.max(0, Math.floor(Number(attention.capacity) || 0));
+  const remains = Math.max(0, capacity - maintained);
+  // A plain, factual warning issued while there is still room to act on it.
+  // Composing a consolidate/shelve is itself an emission that must fit, so the
+  // note has to arrive before attention reaches capacity — not at the wall,
+  // where the very act that would free room can no longer be uttered.
+  const nearLimit = hasLedger && capacity > 0 && maintained > capacity * 0.85;
   return {
     maintained,
     capacity,
@@ -255,10 +293,17 @@ export function projectMemory(units, attention = {}) {
     lines: [
       ...(hasLedger ? [
         `maintained: ${maintained.toLocaleString("en-US")} tokens`,
-        `remains: ${Math.max(0, capacity - maintained).toLocaleString("en-US")} tokens`,
+        `remains: ${remains.toLocaleString("en-US")} tokens`,
+      ] : []),
+      ...(nearLimit ? [
+        `active attention holds ${maintained.toLocaleString("en-US")} of ${capacity.toLocaleString("en-US")} tokens; at the limit no further moment can form. consolidate, shelve, and forget each reduce what active attention holds.`,
       ] : []),
       ...memories.flatMap(narrativeBlock),
       ...recent.flatMap(recentBlock),
+      // The archive index: each folder she shelved memories under, by name.
+      // The full memories receded; these labels are how she reaches them back
+      // with recall(). Their presence is what makes shelve not a forget.
+      ...(folders.length ? ["", "SHELVED — recall by name", ...folders.map((l) => `  · ${l}`)] : []),
     ],
   };
 }

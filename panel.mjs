@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { spawn } from "node:child_process";
 import { buildLife } from "./export.mjs";
 import { loadSetup, saveSetup, DEFAULT_SETUP, PLACEHOLDERS } from "./setup.mjs";
 import { rewind, points } from "./rewind.mjs";
@@ -90,6 +91,27 @@ export function startPanel({
   config = null,
   audible = null,
 }) {
+  // When she lives in a machine (AMI_SHELL_SSH set) her files are there, not in
+  // the empty local workspace. Count her home on the machine, refreshed in the
+  // background so rendering stays synchronous and no request ever waits on ssh.
+  const shellHost = process.env.AMI_SHELL_SSH || "";
+  let machineFiles = 0;
+  if (shellHost) {
+    const countHome = () => {
+      const remote = process.env.AMI_SHELL_EXEC
+        || "export LIMA_HOME=$HOME/.lima; $HOME/lima/bin/limactl shell box timeout 20 bash -s";
+      const p = spawn("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6", shellHost, remote],
+        { stdio: ["pipe", "pipe", "ignore"] });
+      let out = "";
+      p.stdout.on("data", (d) => (out += d));
+      p.on("close", () => { const n = parseInt(String(out).trim(), 10); if (Number.isFinite(n)) machineFiles = n; });
+      p.on("error", () => {});
+      p.stdin.write("ls -A ~ | wc -l\n");
+      p.stdin.end();
+    };
+    countHome();
+    setInterval(countHome, 10000).unref?.();
+  }
   const homePage = () =>
     renderPage({
       log: momentCards(log, 25),
@@ -105,7 +127,8 @@ export function startPanel({
       mind: describeModel(config),
       world: log.last("world")?.content ?? "",
       runtime: {
-        files: files(body).length,
+        files: shellHost ? machineFiles : files(body).length,
+        machine: Boolean(shellHost),
         affordances: body.affordances().length,
         born: log.first()?.at ?? null,
       },

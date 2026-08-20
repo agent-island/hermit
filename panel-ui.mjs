@@ -193,7 +193,7 @@ export function renderPage({
       <div class="rail-title"><b>World</b><button class="text-link" type="button" data-go="room">edit</button></div>
       <dl class="facts">
         <div><dt>Room</dt><dd>${setup.template ? "custom" : "default"}${world ? ` · ${world.length.toLocaleString()} chars` : ""}</dd></div>
-        <div><dt>Workspace</dt><dd>${Number(runtime.files) || 0} files</dd></div>
+        <div><dt>${runtime.machine ? "Machine" : "Workspace"}</dt><dd>${runtime.machine ? `workstation · ${Number(runtime.files) || 0} in ~` : `${Number(runtime.files) || 0} files`}</dd></div>
         <div><dt>Actions</dt><dd>${Number(runtime.affordances) || 0}</dd></div>
         <div><dt>Attention</dt><dd>${attention ? `${escape(attention.maintained)} maintained · ${escape(attention.remains)} remains` : "not recorded"}</dd></div>
       </dl>

@@ -41,10 +41,11 @@ export function renderWorld({ now, previousAt, body, log, setup, incoming, resul
     ),
     "{{gap}}": gap,
     "{{context}}": people,
-    "{{returned}}": returnedLines(results),
+    "{{returned}}": returnedLines(results, setup.format),
     "{{memories}}": memoryLines(
       setup.context === "conversation" ? log.activeMemories() : log.followingMemories(),
       attention,
+      log.shelfLabels(),
     ),
     "{{previous}}": previousLines(previous),
   });
@@ -65,8 +66,30 @@ function workspaceLines(files) {
   return lines;
 }
 
-function returnedLines(results) {
+function returnedLines(results, format) {
   if (!results.length) return [];
+  // The "faculties" framing binds each command to its exact output in one
+  // element — <ran cmd="…">output</ran> — so a returned result can never drift
+  // apart from the act that produced it (the ambiguity that looped earlier
+  // pairs). Every other act wraps generically. Plain framing is unchanged.
+  if (format === "faculties") {
+    const out = [];
+    for (const { call, value } of results) {
+      const run = String(call).match(/^run\((.*)\)\s*$/s);
+      if (run) {
+        let cmd = run[1].trim();
+        try { cmd = JSON.parse(cmd); } catch { /* keep raw */ }
+        out.push(`<ran cmd=${JSON.stringify(String(cmd))}>`);
+        for (const line of String(value).split("\n")) out.push(line);
+        out.push("</ran>");
+      } else {
+        out.push(`<returned call=${JSON.stringify(String(call))}>`);
+        for (const line of String(value).split("\n")) out.push(line);
+        out.push("</returned>");
+      }
+    }
+    return out;
+  }
   const lines = [];
   for (const { call, value } of results) {
     lines.push(call);
@@ -82,8 +105,8 @@ function previousLines(previous) {
   return content.split("\n");
 }
 
-function memoryLines(memories, attention) {
-  return projectMemory(memories, attention).lines;
+function memoryLines(memories, attention, shelved) {
+  return projectMemory(memories, attention, shelved).lines;
 }
 
 function elapsed(ms) {

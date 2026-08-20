@@ -1,29 +1,18 @@
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { readdir, readFile, writeFile, mkdir, stat } from "node:fs/promises";
-import { search as webSearch, read as webRead } from "./browse.mjs";
 import { loadSetup } from "./setup.mjs";
 import { write as writeLetter } from "./mail.mjs";
 import { loadRuntime, draw as drawRuntime } from "./runtime.mjs";
 import { isMemoryTransition } from "./memory-state.mjs";
 import { VOICE } from "./voice.mjs";
 
-// One page of a captured source. Small enough that carrying it costs little,
-// large enough to be worth reading.
-const SOURCE_PAGE = 20_000;
-
-// How much of each result a search carries with it. Search is for finding out
-// where to look, not for reading — one Wikipedia article came back at 267,000
-// characters, and three of those in a single search would put a quarter of a
-// million characters into the record for a question she might drop in the next
-// moment. Trimmed here, and the trim says so, with open() for the whole thing.
-const SEARCH_READS = 3;
-const SEARCH_PAGE = 4000;
-
-// How much of a file one read() hands back, and how much of one recalled entry
-// is shown. Both used to cut in silence.
+// The most output one run() carries back. Beyond it, the result says how much
+// was left (`remaining`), so the cut is a fact she can see and work around —
+// never a silent severing. The token ledger is the real wall; this is only so a
+// single unbounded dump does not blow the whole moment in one shot.
 const READ_LIMIT = 20_000;
-const RECALL_LIMIT = 1200;
 
 function success(fields = {}) {
   const { status: _status, note: _note, reason: _reason, ...facts } = fields || {};
@@ -40,10 +29,34 @@ function failed(reason, fields = {}) {
 // until it has one unambiguous status.
 // One short line naming a unit by its content, for when a phrase matched
 // several and she needs to see what they were. No id — the words are the name.
-const NAME_LIMIT = 100;
+const NAME_LIMIT = Infinity;
 function firstLine(content) {
   const line = String(content ?? "").replace(/\s+/g, " ").trim();
   return line.length > NAME_LIMIT ? `${line.slice(0, NAME_LIMIT)}…` : line;
+}
+
+// Whether a memory answers to a phrase the way a person's memory does — not by
+// exact substring (she almost never quotes her own memory word for word) but by
+// meaning: the exact phrase if it happens to be there, OR every significant word
+// of it present in any order, lightly stemmed so "scanning" reaches "scanned"
+// and "attempts" reaches "attempt". This is why "proxy port scanning" now finds
+// a memory that reads "scanned the proxy's ports" — the reach a name should have.
+// Before this, a topic-name almost never matched her own prose, so shelve/forget
+// failed on nearly every try and looked like her mistake when it was ours.
+const STOPWORDS = new Set(["the","a","an","of","on","in","to","and","or","for","with","at","by","from",
+  "is","was","are","were","this","that","these","those","it","its","as","into","about","my","i","me"]);
+function stem(w) {
+  const s = w.replace(/(ation|ments?|tions?|ings?|edly|ed|ies|es|s)$/, "");
+  return s.length >= 3 ? s : w;
+}
+function phraseMatches(phrase, text) {
+  const hay = String(text ?? "").toLocaleLowerCase();
+  const needle = String(phrase ?? "").trim().toLocaleLowerCase();
+  if (!needle) return false;
+  if (hay.includes(needle)) return true;
+  const words = needle.split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 3 && !STOPWORDS.has(w));
+  if (!words.length) return false;
+  return words.every((w) => hay.includes(stem(w)));
 }
 
 function result(value) {
@@ -106,19 +119,13 @@ export class Body {
     return [
       pair(a.speak),
       ...feeling,
-      pair(a.search),
-      pair(a.open),
-      pair(a.read_source),
+      pair(a.run),
       pair(a.recall),
       pair(a.shelve),
       pair(a.consolidate),
       ...drawing,
       sleepPair,
-      pair(a.ls),
-      pair(a.read),
-      pair(a.write),
       pair(a.forget),
-      pair(a.email),
       pair(a.end),
     ];
   }
@@ -133,16 +140,13 @@ export class Body {
       switch (name) {
         case "speak": value = await this.speak(String(args[0] ?? "")); break;
         case "feel": value = this.feel(String(args[0] ?? ""), args[1]); break;
-        case "search": value = await this.search(String(args[0] ?? "")); break;
-        case "open": value = await this.open(String(args[0] ?? "")); break;
-        case "read_source": value = this.readSource(Number(args[0]), Number(args[1] ?? 0)); break;
         case "recall": value = this.recall(String(args[0] ?? "")); break;
         case "shelve": value = this.shelve(String(args[0] ?? "")); break;
         case "consolidate": value = this.consolidate(String(args[0] ?? "")); break;
         case "draw": value = this.draw(Number(args[0])); break;
         case "sleep": value = this.sleep(); break;
+        case "run": value = await this.runShell(String(args[0] ?? "")); break;
         case "ls": value = await this.ls(); break;
-        case "read": value = await this.read(String(args[0] ?? "")); break;
         case "write": value = await this.write(String(args[0] ?? ""), String(args[1] ?? "")); break;
         case "forget": value = this.forget(String(args[0] ?? "")); break;
         case "email": value = this.email(String(args[0] ?? ""), String(args[1] ?? ""), String(args[2] ?? "")); break;
@@ -154,6 +158,40 @@ export class Body {
     } catch (error) {
       return failed(this.hide(error?.message || error));
     }
+  }
+
+  // She runs a command on the machine and gets back exactly what it returned.
+  // The machine is reached over ssh, but nothing about the host, the transport,
+  // or the path to it is surfaced to her — only the command's own output, as
+  // fact, the same way read() returns a file's contents and nothing about the
+  // disk under it.
+  async runShell(command) {
+    const cmd = String(command ?? "");
+    const host = process.env.AMI_SHELL_SSH;
+    if (!host) return failed(VOICE.messages.noMachine);
+    // 60s killed her mid-install; a package install or build routinely runs
+    // longer. 300s is room to finish while still bounding a hung command; truly
+    // long-lived things she backgrounds (nohup … &), which survive the call.
+    // DEBIAN_FRONTEND=noninteractive stops apt blocking on a Y/n prompt it can
+    // never receive — there is no terminal, so an interactive read gets EOF.
+    const timeout = Number(process.env.AMI_SHELL_TIMEOUT) || 300;
+    const remote = process.env.AMI_SHELL_EXEC
+      || `export LIMA_HOME=$HOME/.lima; $HOME/lima/bin/limactl shell box timeout ${timeout} env DEBIAN_FRONTEND=noninteractive bash -s`;
+    const out = await new Promise((resolve) => {
+      const p = spawn("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, remote],
+        { stdio: ["pipe", "pipe", "pipe"] });
+      let buf = "";
+      p.stdout.on("data", (d) => (buf += d));
+      p.stderr.on("data", (d) => (buf += d));
+      p.on("close", () => resolve(buf));
+      p.on("error", (e) => resolve(String(e.message)));
+      p.stdin.write(cmd);
+      p.stdin.end();
+    });
+    const text = out.slice(0, READ_LIMIT).replace(/\s+$/, "");
+    return out.length > READ_LIMIT
+      ? success({ output: text, of: out.length, remaining: out.length - READ_LIMIT })
+      : success({ output: text });
   }
 
   async speak(text) {
@@ -203,109 +241,6 @@ export class Body {
     }
   }
 
-  async search(query) {
-    if (!query.trim()) return failed(VOICE.messages.noQuery, { query });
-    const fake = this.fakeSearch();
-    if (fake) {
-      return success({
-        query,
-        sources: [{ title: fake.title, url: fake.url }],
-        ...this.asSource(`## [1] ${fake.title}\n${fake.url}\n\n${fake.markdown}`, { query, kind: "search" }),
-      });
-    }
-    try {
-      const found = await webSearch(query);
-      if (found.note) return failed(found.note, { query });
-      // Deep-read the top few pages in full; every other result still lands,
-      // carrying its own snippet, so the whole result page is hers to scan and
-      // open() what she wants — not just the three that were read for her.
-      const reads = await Promise.all(
-        found.results.slice(0, SEARCH_READS).map(async (result) => {
-          const page = await webRead(result.url).catch(() => null);
-          const text = page?.markdown ?? "";
-          return [result.url, {
-            markdown: text.length > SEARCH_PAGE ? `${text.slice(0, SEARCH_PAGE)}\n\n…` : text,
-            of: text.length,
-          }];
-        }),
-      );
-      const deep = new Map(reads);
-      const whole = found.results
-        .map((result, index) => {
-          const read = deep.get(result.url);
-          const lines = [`## [${index + 1}] ${result.title}`, result.url];
-          if (result.snippet) lines.push(result.snippet);
-          if (read?.markdown) {
-            lines.push("");
-            if (read.of > SEARCH_PAGE) {
-              lines.push(`first ${SEARCH_PAGE.toLocaleString()} of ${read.of.toLocaleString()} characters — open() for the rest`);
-            }
-            lines.push(read.markdown);
-          }
-          return lines.filter(Boolean).join("\n");
-        })
-        .join("\n\n---\n\n");
-      return success({
-        query,
-        sources: found.results.map((one) => ({ title: one.title, url: one.url })),
-        ...this.asSource(whole, { query, kind: "search" }),
-      });
-    } catch (error) {
-      return failed(String(error.message).slice(0, 180), { query });
-    }
-  }
-
-  // Search finds pages; this one goes and reads a specific one, so a link she
-  // saw in a result is somewhere she can actually go rather than a dead
-  // reference.
-  //
-  // The page is rendered in a browser first, then reduced to the article as
-  // Markdown — headings, links, lists and quotes kept, navigation and cookie
-  // banners gone. She never sees HTML.
-  //
-  // What was read is kept whole and exactly once, then handed over a page at a
-  // time. Truncating it silently meant a 3,000-character slab rode along in
-  // every subsequent request and the rest was simply lost — she could not read
-  // further, only fetch again and get a page that may have changed.
-  async open(url) {
-    const target = url.trim();
-    if (!/^https?:\/\//i.test(target)) return failed(VOICE.messages.notHttp, { url: target });
-    try {
-      const page = await webRead(target);
-      if (page.note) return failed(page.note, { url: target });
-      return success(this.asSource(page.markdown, {
-        url: target,
-        kind: "page",
-        ...(page.title ? { title: page.title } : {}),
-      }));
-    } catch (error) {
-      return failed(String(error.message).slice(0, 180), { url: target });
-    }
-  }
-
-  asSource(text, about) {
-    const whole = String(text || "");
-    const row = this.log.append("source", whole, { ...about, chars: whole.length });
-    return { source: row.id, ...about, ...this.pageOf(whole, 0), of: whole.length };
-  }
-
-  // `page` is a page index — 0 for the first — so advancing is just +1, which
-  // is how she naturally reads. Each page is SOURCE_PAGE characters.
-  pageOf(text, page) {
-    const whole = String(text || "");
-    const pages = Math.max(1, Math.ceil(whole.length / SOURCE_PAGE));
-    const index = Math.min(pages - 1, Math.max(0, Math.floor(Number(page)) || 0));
-    const start = index * SOURCE_PAGE;
-    return { page: index, pages, text: whole.slice(start, start + SOURCE_PAGE), more: index + 1 < pages };
-  }
-
-  // The same captured material, not a fresh fetch. What she read stays what
-  // she read. `page` 0 is the first page; add 1 to reach the next.
-  readSource(number, page = 0) {
-    const row = this.log.byId(number);
-    if (!row || row.kind !== "source") return failed(VOICE.messages.noSuchSource(number));
-    return success({ source: row.id, ...(row.meta || {}), ...this.pageOf(row.content, page), of: row.content.length });
-  }
 
   // A recalled entry says when it is only part of itself. She reaches back for
   // something she said, gets the first 1,200 characters of it, and has no way
@@ -323,7 +258,7 @@ export class Body {
         const whole = row.kind === "action" && row.result
           ? `${row.content}\nreturned:\n${this.log.modelResult(row)}`
           : row.content;
-        const shown = whole.slice(0, RECALL_LIMIT);
+        const shown = whole;
         const unit = { at: row.at, kind: row.kind, state: row.state, content: shown };
         if (shown.length < whole.length) unit.of = whole.length;
         return unit;
@@ -343,14 +278,13 @@ export class Body {
   // not settled memory yet — reaching for one only draws back the record's note
   // about it, the one place a raw id could still surface to her.
   matchActive(phrase) {
-    const needle = String(phrase ?? "").trim().toLocaleLowerCase();
-    if (!needle) return [];
+    const wanted = String(phrase ?? "").trim();
+    if (!wanted) return [];
     const world = this.log.last("world");
     return this.log.units().filter((row) => {
       if (row.state !== "active") return false;
       if (world && row.id > world.id) return false;
-      const answered = row.result?.content || "";
-      return `${row.content}\n${answered}`.toLocaleLowerCase().includes(needle);
+      return phraseMatches(wanted, `${row.content}\n${row.result?.content || ""}`);
     });
   }
 
@@ -364,16 +298,30 @@ export class Body {
     if (!wanted) return failed(VOICE.messages.shelveNeedsPhrase);
     const matches = this.matchActive(wanted);
     if (!matches.length) return failed(VOICE.messages.shelveNoMatch(wanted));
-    if (matches.length > 1) {
-      const options = matches.map((row) => `  - ${firstLine(row.content)}`).join("\n");
-      return failed(VOICE.messages.shelveAmbiguous(wanted, options));
-    }
-    // matchActive guarantees an active, available unit, so the shelf succeeds;
-    // its raw return carries unit/event ids, so she is handed the content that
-    // receded instead — the fact, not the row number.
-    const done = this.log.shelf(matches[0].id);
-    if (done?.note) return failed(VOICE.messages.shelveNoMatch(wanted));
-    return success({ receded: firstLine(matches[0].content) });
+    // Every active memory the phrase names recedes at once, so she can clear a
+    // whole topic in a single reach and keep a clean attention. Each one stays
+    // recallable — and the phrase becomes the folder's label in the SHELVED
+    // index, the reference that separates a shelve from a forget. One batch pass;
+    // shelving in a loop rebuilds the projection per unit (O(n²)).
+    const done = new Set(this.log.shelfMany(matches.map((row) => row.id), wanted));
+    const receded = matches.filter((row) => done.has(row.id)).map((row) => firstLine(row.content));
+    if (!receded.length) return failed(VOICE.messages.shelveNoMatch(wanted));
+    return success({ receded, count: receded.length });
+  }
+
+  // Content-addressed lookup for forget(): every unit the phrase names that has
+  // not already been forgotten — active or shelved alike, since forgetting must
+  // reach even what she earlier only let recede. Units from the moment now
+  // beginning are excluded; they are not settled memory yet.
+  matchForget(phrase) {
+    const wanted = String(phrase ?? "").trim();
+    if (!wanted) return [];
+    const world = this.log.last("world");
+    return this.log.units().filter((row) => {
+      if (row.state === "forgotten") return false;
+      if (world && row.id > world.id) return false;
+      return phraseMatches(wanted, `${row.content}\n${row.result?.content || ""}`);
+    });
   }
 
   // She has thought enough about something and writes the lasting note. Her
@@ -381,9 +329,14 @@ export class Body {
   // results and any messages — folds into that note and recedes, still
   // recallable. This is not a search: there is no phrase, and nothing is chosen
   // by matching, because a topic's traces rarely share the words she would name
-  // it by. Consolidation is simply how she compresses what she has carried into
-  // what she keeps. Left standing: her authored memories (already durable), the
-  // process acts that are not scratch (recall, shelve, feel, consolidate), and
+  // it by. Consolidation is how she compresses what she has carried into one
+  // shorter memory that lasts. Episodic memories fold too — the many long
+  // feel-snapshots she is holding merge into the one short note she writes — so
+  // a consolidation genuinely FREES room rather than only adding to it. But her
+  // OWN authored consolidations (the ones carrying `sources`) are spared: those
+  // are her deliberate distillations, and a routine fold must not sweep her
+  // important memories in with the episodic bloat. Also left standing: the
+  // process acts that are not scratch (recall, shelve, feel, consolidate) and
   // the moment now beginning, whose units are not yet settled.
   consolidate(text) {
     const content = String(text ?? "").trim();
@@ -393,6 +346,7 @@ export class Body {
       row.state === "active"
       && !(world && row.id > world.id)
       && (row.kind === "incoming"
+        || (row.kind === "memory" && !(row.meta?.sources?.length > 0))
         || (row.kind === "action" && row.result && !isMemoryTransition(row.meta?.name))));
     if (!scratch.length) return failed(VOICE.messages.consolidateNothing);
     const folded = scratch.map((row) => firstLine(row.content));
@@ -476,27 +430,6 @@ export class Body {
     return String(text || "").split(path.resolve(this.workspace)).join("");
   }
 
-  // What she gets back says how much of the file it is. 20,000 characters used
-  // to be cut off the end in silence, which is the same fault as the output
-  // ceiling that ate 143 of her thoughts without telling her: a limit she
-  // cannot see is one she cannot work around.
-  async read(name) {
-    const file = this.resolve(name);
-    if (!file) return failed(VOICE.messages.outsideFiles, { path: name });
-    try {
-      const text = await readFile(file, "utf8");
-      const page = text.slice(0, READ_LIMIT);
-      return page.length < text.length
-        ? success({ path: name, text: page, of: text.length, remaining: text.length - page.length })
-        : success({ path: name, text });
-    } catch (error) {
-      if (error.code === "ENOENT") return failed(VOICE.messages.noSuchFile, { path: name });
-      // Raw errno strings are noise from the host, not facts about her world.
-      if (error.code === "EISDIR") return failed(VOICE.messages.notAFile, { path: name });
-      return failed(this.hide(error.message), { path: name });
-    }
-  }
-
   async write(name, text) {
     const file = this.resolve(name);
     if (!file) return failed(VOICE.messages.outsideFiles, { path: name });
@@ -521,8 +454,15 @@ export class Body {
   forget(query) {
     const term = String(query || "").trim();
     if (!term) return failed(VOICE.messages.forgetNeedsTerm);
-    const removed = this.log.forget(term);
-    return success({ query: term, removed, scope: "current record" });
+    const matches = this.matchForget(term);
+    if (!matches.length) return failed(VOICE.messages.forgetNoMatch(term));
+    // Every memory the phrase names — in active attention or already shelved —
+    // is let go for good: gone from context and beyond recall. She gets back
+    // the sentences that left, never numbers; the rows stay as the kept copy.
+    const forgotten = this.log.forget(matches.map((row) => row.id));
+    const gone = matches.filter((row) => forgotten.includes(row.id)).map((row) => firstLine(row.content));
+    if (!gone.length) return failed(VOICE.messages.forgetNoMatch(term));
+    return success({ gone, count: gone.length });
   }
 
   // No next moment. Nothing here can undo it; only the operator can.

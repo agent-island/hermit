@@ -88,7 +88,7 @@ test("consolidation folds real units, tolerates a stray id, and keeps provenance
   });
 });
 
-test("consolidate folds the active episodic scratch into the note, sparing memories and process-acts", async () => {
+test("consolidate folds episodic scratch AND feel-snapshots, sparing authored consolidations and process-acts", async () => {
   await withLog((log, directory) => {
     const body = new Body({ log, workspace: directory });
     log.append("world", "a moment");
@@ -97,22 +97,27 @@ test("consolidate folds the active episodic scratch into the note, sparing memor
     const open = log.append("action", 'open("http://e.com")', { name: "open", args: ["http://e.com"] });
     log.append("result", "page…", { name: "open", action: open.id, value: { status: "success" }, yielded: true });
     const message = log.append("incoming", "a note from cy", { from: "cy" });
-    const memory = log.append("memory", "an earlier durable memory", { sources: [] });
+    // An episodic feel-snapshot (no sources) — bloat, folds. An authored
+    // consolidation (carries sources) — her distillation, must be spared.
+    const episodic = log.append("memory", "an episodic feel-snapshot", { emotion: "focus" });
+    const authored = log.append("memory", "a distillation she authored earlier", { sources: [search.id] });
     const feel = log.append("action", 'feel("focus")', { name: "feel", args: ["focus"] });
     log.append("result", "felt", { name: "feel", action: feel.id, value: { status: "success" }, yielded: true });
     log.append("world", "next moment");
 
     const out = body.consolidate("The outbreak is spreading toward Kinshasa.");
     assert.equal(out.status, "success");
-    // Her acts, their results, and the message — the working scratch — folded.
-    assert.equal(out.kept, 3);
+    // Acts, results, the message, AND the episodic feel-snapshot fold — but not
+    // the authored consolidation, so kept counts the four episodic units only.
+    assert.equal(out.kept, 4);
     // The note she wrote is now a durable memory.
     assert.ok(log.activeMemories().some((m) => m.content === "The outbreak is spreading toward Kinshasa."));
-    // The scratch receded; her earlier memory and the feel() are left standing.
+    // Episodic scratch receded; her authored distillation and the feel() stand.
     assert.equal(log.unit(search.id).state, "shelved");
     assert.equal(log.unit(open.id).state, "shelved");
     assert.equal(log.unit(message.id).state, "shelved");
-    assert.equal(log.unit(memory.id).state, "active");
+    assert.equal(log.unit(episodic.id).state, "shelved");
+    assert.equal(log.unit(authored.id).state, "active");
     assert.equal(log.unit(feel.id).state, "active");
 
     // With the scratch gone, a second fold finds nothing to compress.

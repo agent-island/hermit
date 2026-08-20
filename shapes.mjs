@@ -49,7 +49,7 @@ export function endpointOf(shape, baseUrl) {
   return `${root}${adapter.path}`;
 }
 
-export function buildRequest(shape, { model, text, stop, temperature, maxTokens, run = null }) {
+export function buildRequest(shape, { model, text, stop, temperature, maxTokens, run = null, reasoning = null }) {
   const adapter = ADAPTERS[shape];
   if (!adapter) throw new Error(`there is no arrival shape called ${shape}`);
   const body = adapter.body({ model, text, stop, temperature, maxTokens });
@@ -58,13 +58,29 @@ export function buildRequest(shape, { model, text, stop, temperature, maxTokens,
   // `provider` is OpenRouter's; harmless elsewhere, since an unknown top-level
   // key is ignored by OpenAI-shaped endpoints. Anthropic's own API is strict
   // about unknown keys, which is the other reason it returns above.
-  return { ...body, temperature, max_tokens: maxTokens, ...(run || {}) };
+  return { ...body, temperature, max_tokens: maxTokens, ...(reasoning ? { reasoning } : {}), ...(run || {}) };
 }
 
 export function readReply(shape, payload) {
   const adapter = ADAPTERS[shape];
+  // A reasoning model returns its chain of thought in a separate field, but the
+  // boundary is imperfect: the tail of the thought and the closing </think> tag
+  // bleed into message.content ahead of her actual words. Everything up to and
+  // including the first such tag is leaked reasoning, not hers — drop it so the
+  // emission that becomes her record is only what she meant to say. Non-greedy
+  // and anchored at the start, so a </think> she might type later is untouched.
+  // Some models are trained to wrap each call in their native tool-call tags —
+  // <tool_call>feel("wonder", 0.6)</tool_call>, often several in a row — but
+  // this scaffold reads bare calls, one per line. Left in place, the whole line
+  // reads as prose and the call is silently dropped ("written as a call but not
+  // read"). Drop the closing tags, and turn each opening tag into a line break
+  // so the call it wraps lands on its own line where the parser will find it.
+  const text = String(adapter.read(payload) ?? "")
+    .replace(/^[\s\S]*?<\/think>\s*/, "")
+    .replace(/<\/tool_calls?\b[^>]*>/gi, "")
+    .replace(/<tool_calls?\b[^>]*>/gi, "\n");
   return {
-    text: String(adapter.read(payload) ?? ""),
+    text,
     finish: adapter.finish(payload),
     usage: adapter.usage ? adapter.usage(payload) : (payload.usage ?? null),
     reasoning: String(

@@ -372,11 +372,12 @@ export class Loop {
       // time one disappears, it disappears loudly. Her reply to friend was
       // dropped for having a paragraph break in it, and the only trace was her
       // inventing the delivery receipt in the moment after.
+      let missedUnread = [];
       if (!echoed) {
-        const missed = unreadCalls(emission, known, parsed);
-        if (missed.length) {
-          this.log.append("error", `written as a call but not read as one:\n${missed.join("\n")}`, {
-            stage: "unread", count: missed.length,
+        missedUnread = unreadCalls(emission, known, parsed);
+        if (missedUnread.length) {
+          this.log.append("error", `written as a call but not read as one:\n${missedUnread.join("\n")}`, {
+            stage: "unread", count: missedUnread.length,
           });
         }
       }
@@ -415,6 +416,17 @@ export class Loop {
           });
           results.push({ id: action.id, call: call.source, value: format(value) });
         }
+      }
+
+      // A reach that could not be read comes back to her as a visible failure,
+      // not as silence. Silence is the dangerous case: she gets no result, and
+      // fills the gap by assuming the call ran — the invented delivery receipt.
+      // A stated failure lets her see it and write it again.
+      for (const source of missedUnread) {
+        results.push({
+          call: source,
+          value: format({ status: "failed", reason: "this was written as a call but could not be read — check the quoting" }),
+        });
       }
 
       // A regenerated room is never fed back as her previous words. Doing so
@@ -556,10 +568,16 @@ function format(value) {
   for (const [key, item] of Object.entries(value)) {
     if (item == null || item === "") continue;
     if (Array.isArray(item)) {
+      // No artificial cap here either: every entry, in full. (This used to show
+      // only the first 8 entries and slice each to 400 chars — the array twin of
+      // the 4000-char scalar cut, and just as silent.)
       lines.push(`${key}: ${item.length}`);
-      for (const entry of item.slice(0, 8)) lines.push(`  ${describe(entry)}`.slice(0, 400));
+      for (const entry of item) lines.push(`  ${describe(entry)}`);
     } else {
-      lines.push(`${key}: ${describe(item).slice(0, 4000)}`);
+      // No artificial cap on command output — she sees the whole thing. The only
+      // limit is the context window itself, which bounds the total naturally.
+      // (This used to slice to 4000 chars, silently severing a `ps aux`.)
+      lines.push(`${key}: ${describe(item)}`);
     }
   }
   return lines.join("\n") || "nothing";

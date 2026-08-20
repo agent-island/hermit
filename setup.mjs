@@ -75,6 +75,10 @@ export function saveSetup(log, value) {
   if (["moment", "conversation"].includes(value?.context)) next.context = value.context;
   if (typeof value?.heartbeat === "boolean") next.heartbeat = value.heartbeat;
   if (typeof value?.emotion === "boolean") next.emotion = value.emotion;
+  // How the room is rendered: "plain" (the default sections) or "faculties"
+  // (our own tag language — no room, no moment, bound command/output). Only
+  // changes rendering, so it is safe to carry with the rest of the setup.
+  if (["plain", "faculties"].includes(value?.format)) next.format = value.format;
   if (Number.isFinite(Number(value?.sleepSeconds))) {
     next.sleepSeconds = Math.min(3600, Math.max(10, Math.round(Number(value.sleepSeconds))));
   }
