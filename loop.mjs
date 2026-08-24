@@ -537,25 +537,23 @@ export class Loop {
   }
 }
 
-// Her recent moments, as prose with a time on each — the way a mind holds what
-// just happened. No id sits in the header: the number is the record's key, not
-// something she thinks in, and nothing here is reached by it (calls are parsed
-// from the emission text, memories by phrase). Time stays, because when a thing
-// happened is part of remembering it.
+// Recent life as content rather than a clock-indexed transcript. Exact times
+// remain in the observer archive; the model-facing continuity carries what
+// happened without making when it happened a standing subject.
 function historyUnit(unit, known) {
   if (unit.kind === "incoming") {
-    return `INCOMING · ${unit.at}\n${unit.meta?.from || "someone"}: ${unit.content}\n\n`;
+    return `INCOMING\n${unit.meta?.from || "someone"}: ${unit.content}\n\n`;
   }
   if (unit.kind === "emission") {
     if (looksLikeTheRoom(unit.content)) return "";
     const prose = withoutCalls(unit.content, parseCalls(unit.content, known)).trim();
-    return prose ? `EMISSION · ${unit.at}\n${prose}\n\n` : "";
+    return prose ? `EMISSION\n${prose}\n\n` : "";
   }
   if (unit.kind !== "action") return "";
 
   const name = unit.meta?.name || "action";
   const call = compactCall(unit);
-  let entry = `ACTION · ${unit.at}\n${call}\n`;
+  let entry = `ACTION\n${call}\n`;
   if (unit.result && name !== "recall") {
     entry += `RETURNED\n${unit.fact || `${name} completed`}\n`;
   }

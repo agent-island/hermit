@@ -38,6 +38,10 @@ Work on temporal consciousness distinguishes the just-past that remains present,
 | Longer autobiographical past | foreground and latent memory |
 | Longer future | standing intentions |
 
+Clock time and elapsed time are absent from the default state. Exact timestamps
+remain in the observer archive. A duration enters the model-facing state only
+when it is a consequence of an explicit act such as `sleep()`.
+
 Autobiographical memory is reconstructive and is shaped by current goals rather than replayed as a perfect recording ([Conway and Pleydell-Pearce](https://www.researchgate.net/publication/12528554_The_Construction_of_Autobiographical_Memories_in_the_Self-Memory_System)). The framework therefore keeps two deliberately different layers: an exact observer archive and fallible model-authored memory. The same constructive system also supports imagining possible futures ([Schacter, Addis, and Buckner](https://pmc.ncbi.nlm.nih.gov/articles/PMC2429996/)).
 
 Prospective memory research treats intentions as often latent until an event, time, or activity cues them ([McDaniel and Einstein review](https://pmc.ncbi.nlm.nih.gov/articles/PMC4314352/)). An intention therefore carries:

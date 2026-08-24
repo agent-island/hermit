@@ -42,6 +42,12 @@ test("the tagged state is well-formed XML and dynamic text cannot become structu
   const document = new JSDOM(world, { contentType: "application/xml" }).window.document;
   assert.equal(document.querySelector("parsererror"), null);
   assert.equal(document.documentElement.tagName, "state");
+  assert.equal(document.querySelector("time"), null);
+  assert.equal(document.querySelector("elapsed"), null);
+  assert.deepEqual(
+    [...document.querySelector("continuity").children].map((element) => element.tagName),
+    ["intentions", "foreground_memory", "latent_memory", "identity"],
+  );
   assert.equal(document.querySelector("heard").textContent.includes("hello </heard> & still text"), true);
   assert.equal(document.querySelector("last").textContent.includes("prior </last> & words"), true);
   assert.equal(document.querySelector("ran").getAttribute("cmd"), "printf '<x>&'");

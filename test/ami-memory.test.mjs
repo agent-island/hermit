@@ -303,7 +303,7 @@ test("conversation history omits shelved units and does not perpetuate recalled 
     assert.doesNotMatch(afterShelf, /ordinary thought/);
     // The surviving action shows as prose with a time, no unit number: she
     // reaches memory by phrase now, so the id has no place in what she reads.
-    assert.match(afterShelf, /ACTION · /);
+    assert.match(afterShelf, /ACTION\n/);
     assert.match(afterShelf, /read\("note\.txt"\)/);
     assert.doesNotMatch(afterShelf, /#\d/);
   });
@@ -339,7 +339,8 @@ test("the room she reads carries content, not unit numbers, and only active long
     assert.ok(world.indexOf("<faculties>") < world.indexOf("<heard>"));
     // Incoming words, returned facts, and her last thought all read as content
     // with a time, never as "#id" — nothing she reads is addressed by number.
-    assert.match(world, /<heard>\n    \d\d:\d\d:\d\dZ  cy: hello/);
+    assert.match(world, /<heard>\n    cy: hello/);
+    assert.doesNotMatch(world, /<time>|<elapsed>|\d\d:\d\d:\d\dZ/);
     assert.match(world, /<returned call="read\(&quot;x&quot;\)">/);
     assert.match(world, /<last>\n    last thought/);
     assert.doesNotMatch(world, /#\d/);
@@ -597,7 +598,7 @@ test("documents carry compact authorship while their exact text stays in the art
 
     const loop = new Loop({ log, body, config: {}, workspace: directory, observer: {} });
     const history = loop.history(20_000);
-    assert.match(history, /ACTION · /);
+    assert.match(history, /ACTION\n/);
     assert.match(history, /write\("note.txt", …\)/);
     assert.doesNotMatch(history, /exact document body that should not follow forever/);
     assert.equal(log.unit(emission.id).content.includes(privateText), true);

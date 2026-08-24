@@ -19,9 +19,10 @@ test("sleep takes no parameter and rests for the configured duration", async () 
 
   assert.equal(result.seconds, 10);
   assert.equal("returning_for" in result, false);
+  assert.equal("until" in result, false);
   assert.equal(values.get("wake_why"), "");
-  assert.ok(new Date(result.until).getTime() >= before + 9_000);
-  assert.ok(new Date(result.until).getTime() <= before + 11_000);
+  assert.ok(body.wakeAt.getTime() >= before + 9_000);
+  assert.ok(body.wakeAt.getTime() <= before + 11_000);
   assert.deepEqual(body.affordances().find(([form]) => form.startsWith("sleep")), [
     "sleep()", "rests for 10 seconds",
   ]);

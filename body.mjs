@@ -402,7 +402,6 @@ export class Body {
           : row.content;
         const shown = whole;
         const unit = {
-          at: row.at,
           kind: row.kind === "memory" ? (row.meta?.mental || "memory") : row.kind,
           state: row.state,
           content: shown,
@@ -520,7 +519,7 @@ export class Body {
     this.wakeAt = new Date(Date.now() + seconds * 1000);
     this.wakeWhy = "";
     this.log.set("wake_why", "");
-    return success({ seconds, until: this.wakeAt.toISOString() });
+    return success({ seconds });
   }
 
   // A directory is not a file. It used to be reported as one, with the size

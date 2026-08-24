@@ -20,10 +20,6 @@
 // or tell the model what kind of person to become.
 export const ROOM = `<state>
 <continuity>
-  <identity>
-    {{identity}}
-  </identity>
-
   <intentions>
     {{intentions}}
   </intentions>
@@ -35,6 +31,10 @@ export const ROOM = `<state>
   <latent_memory>
     {{latent}}
   </latent_memory>
+
+  <identity>
+    {{identity}}
+  </identity>
 </continuity>
 
 <faculties>
@@ -44,9 +44,6 @@ export const ROOM = `<state>
 </faculties>
 
 <present>
-  <time>{{time}}</time>
-  <elapsed>{{elapsed}}</elapsed>
-
   <around>
     <files>
       {{files}}

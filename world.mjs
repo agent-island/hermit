@@ -56,7 +56,7 @@ export function renderWorld({ now, previousAt, body, log, setup, incoming, resul
     // Whoever it came from, by the name the context carries. Nothing here
     // names an observer.
     "{{incoming}}": encodeLines(incoming.map(
-      (event) => `${clock(event.at)}  ${event.meta?.from || "someone"}: ${event.content}`,
+      (event) => `${event.meta?.from || "someone"}: ${event.content}`,
     ), tagged),
     "{{gap}}": gap,
     "{{context}}": encodeLines(people, tagged),
@@ -192,8 +192,4 @@ function elapsed(ms) {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ${minutes % 60}m`;
   return `${Math.floor(hours / 24)}d ${hours % 24}h`;
-}
-
-function clock(at) {
-  return String(at).slice(11, 19) + "Z";
 }
