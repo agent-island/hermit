@@ -87,7 +87,7 @@ test("readable record preserves chronology and pairs actions with results", asyn
     assert.ok(rendered.html.indexOf("consider the available actions") < rendered.html.indexOf("second thought"));
     assert.match(rendered.html, /read\(&quot;note\.txt&quot;\)/);
     assert.match(rendered.html, /read all of note\.txt/);
-    assert.match(rendered.html, /recorded \? characters of speech/);
+    assert.match(rendered.html, /recorded \? characters of thought/);
     assert.match(rendered.html, /stored local letter 1 addressed to friend@example\.com/);
     assert.doesNotMatch(rendered.html, /heard in the room|sent to friend|delivered to friend/);
     assert.match(rendered.html, /ACTION #/);
@@ -135,7 +135,7 @@ test("readable record does not repeat call-only emissions above their action row
     const rendered = momentCards(log, 10);
     assert.match(rendered.html, /2 executable calls were emitted · shown below with results/);
     assert.match(rendered.html, /EMISSION #/);
-    assert.match(rendered.html, /recorded \? characters of speech/);
+    assert.match(rendered.html, /recorded \? characters of thought/);
     assert.doesNotMatch(rendered.html, /heard in the room/);
   } finally {
     await rm(directory, { recursive: true, force: true });

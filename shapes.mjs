@@ -61,8 +61,48 @@ export function buildRequest(shape, { model, text, stop, temperature, maxTokens,
   return { ...body, temperature, max_tokens: maxTokens, ...(reasoning ? { reasoning } : {}), ...(run || {}) };
 }
 
+// Some models (kimi-k3) surface their acts not as bare lines but in their own
+// native tool-call channel — <|open|>call tool="run"…<|open|>argument key=…
+// type=…<|sep|>VALUE<|close|>argument…<|close|>call. These are REAL acts she
+// emitted; left as-is the parser reads zero and the moment is lost ("she acted
+// and we dropped it"). Rewrite each call into the bare form the scaffold reads —
+// run("…"), feel("…", 0.7) — inventing nothing, only re-expressing her own acts.
+function unpackNativeCalls(text) {
+  if (!/<\|open\|>call\s+tool=/.test(text)) return text;
+  const calls = [];
+  const callRe = /<\|open\|>call\s+tool="([^"]+)"[\s\S]*?(?=<\|close\|>call)/g;
+  let m;
+  while ((m = callRe.exec(text))) {
+    const name = m[1];
+    const args = [];
+    const argRe = /<\|open\|>argument\s+key="[^"]*"\s+type="([^"]+)"<\|sep\|>([\s\S]*?)<\|close\|>argument/g;
+    let a;
+    while ((a = argRe.exec(m[0]))) {
+      args.push(a[1] === "number" ? String(Number(a[2])) : JSON.stringify(a[2]));
+    }
+    calls.push(`${name}(${args.join(", ")})`);
+  }
+  return calls.length ? calls.join("\n") : text;
+}
+
 export function readReply(shape, payload) {
   const adapter = ADAPTERS[shape];
+  const choice = payload.choices?.[0] ?? {};
+  const message = choice.message ?? {};
+  // Keep the provider's structured reasoning blocks intact. Newer providers
+  // can return plaintext, summaries, signatures, or encrypted continuity data
+  // here; flattening the array would destroy information needed to inspect or
+  // continue the response later. Chat replies place these fields in `message`;
+  // bare /completions replies (including Ox Alpha) place them on the choice.
+  const reasoningDetails = message.reasoning_details ?? choice.reasoning_details ?? null;
+  const directReasoning = message.reasoning_content ?? message.reasoning
+    ?? choice.reasoning_content ?? choice.reasoning ?? "";
+  const readableDetails = Array.isArray(reasoningDetails)
+    ? reasoningDetails
+        .map((detail) => detail?.text ?? detail?.summary ?? "")
+        .filter(Boolean)
+        .join("\n")
+    : "";
   // A reasoning model returns its chain of thought in a separate field, but the
   // boundary is imperfect: the tail of the thought and the closing </think> tag
   // bleed into message.content ahead of her actual words. Everything up to and
@@ -75,18 +115,17 @@ export function readReply(shape, payload) {
   // reads as prose and the call is silently dropped ("written as a call but not
   // read"). Drop the closing tags, and turn each opening tag into a line break
   // so the call it wraps lands on its own line where the parser will find it.
-  const text = String(adapter.read(payload) ?? "")
-    .replace(/^[\s\S]*?<\/think>\s*/, "")
+  const text = unpackNativeCalls(
+    String(adapter.read(payload) ?? "")
+      .replace(/^[\s\S]*?<\/think>\s*/, ""),
+  )
     .replace(/<\/tool_calls?\b[^>]*>/gi, "")
     .replace(/<tool_calls?\b[^>]*>/gi, "\n");
   return {
     text,
     finish: adapter.finish(payload),
     usage: adapter.usage ? adapter.usage(payload) : (payload.usage ?? null),
-    reasoning: String(
-      payload.choices?.[0]?.message?.reasoning_content
-        ?? payload.choices?.[0]?.message?.reasoning
-        ?? "",
-    ) || null,
+    reasoning: String(directReasoning || readableDetails) || null,
+    reasoningDetails,
   };
 }

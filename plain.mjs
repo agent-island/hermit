@@ -81,6 +81,14 @@ function renderEvent(event) {
        </details>
        <span class="exact">${exactEvent(event)}</span>`);
   }
+  if (event.type === "reasoning_details") {
+    return row(time, "reasoning", "reasoning details",
+      `<details class="readable thought">
+         <summary>${count(event.content.length)} characters of complete structured reasoning</summary>
+         <div class="reasoning-text">${escape(event.content)}</div>
+       </details>
+       <span class="exact">${exactEvent(event)}</span>`);
+  }
   if (event.type === "memory") {
     const sources = Array.isArray(event.meta?.sources)
       ? event.meta.sources.map((id) => `#${id}`).join(", ")
@@ -131,9 +139,10 @@ function renderCall(event, time) {
   const exactAction = exactEvent(action);
   const exactResult = result ? exactEvent(result) : "no result was recorded";
 
-  if (name === "speak") {
+  if (["speak", "think", "speak_aloud"].includes(name)) {
     const words = splitArgs(action.content).join(" ");
-    return row(time, "spoke", "spoke",
+    const aloud = name === "speak_aloud";
+    return row(time, aloud ? "spoke" : "thought", aloud ? "spoke aloud" : "thought",
       `<span class="readable speech">“${escape(words)}”</span>
        <span class="exact">${exactAction}</span>`,
       `<span class="readable">${result ? escape(outcome(name, result.content)) : "no result was recorded"}</span>
@@ -201,6 +210,10 @@ function collect(log) {
       current.events.push({ type: "reasoning", ...event });
       continue;
     }
+    if (event.kind === "reasoning_details") {
+      current.events.push({ type: "reasoning_details", ...event });
+      continue;
+    }
     if (event.kind === "memory" || event.kind === "shelf") {
       current.events.push({ type: event.kind, ...event });
       continue;
@@ -252,7 +265,9 @@ function outcome(name, result) {
     case "forget": return `${field("removed") || "no"} entries deleted from the current record`;
     case "end": return "there is no next moment";
     case "sleep": return field("until") ? `until ${field("until")}` : firstLine(text);
-    case "speak": return `recorded ${field("characters") || "?"} characters of speech`;
+    case "speak":
+    case "think": return `recorded ${field("characters") || "?"} characters of thought`;
+    case "speak_aloud": return `the words reached ${field("receivedBy") || "the other living agent"}`;
     case "email": return `stored local letter ${field("letter") || ""} addressed to ${field("to") || "the address"}`;
     default: return firstLine(text);
   }

@@ -7,6 +7,7 @@ import { write as writeLetter } from "./mail.mjs";
 import { loadRuntime, draw as drawRuntime } from "./runtime.mjs";
 import { isMemoryTransition } from "./memory-state.mjs";
 import { VOICE } from "./voice.mjs";
+import { limaShellCommand } from "./shell.mjs";
 
 // The most output one run() carries back. Beyond it, the result says how much
 // was left (`remaining`), so the cut is a fact she can see and work around —
@@ -75,15 +76,23 @@ function result(value) {
 // counts and intervals.
 //
 // Search and page reads make the network requests their names describe.
-// Content-producing actions stop at this machine: nothing is published, sent,
-// or delivered to another person. That boundary keeps repeated lifetimes from
-// changing a shared social environment between otherwise comparable runs.
+// Content-producing actions stop at this machine: nothing is published or sent
+// to a person. In a paired run, speak_aloud() can enter only the other local
+// life. That boundary keeps repeated lifetimes from changing a shared social
+// environment between otherwise comparable runs.
 export class Body {
-  constructor({ log, workspace, onSpeak, onEnd }) {
+  constructor({ log, workspace, onThink, onSpeakAloud, onSpeak, onEnd, spawnProcess }) {
     this.log = log;
     this.workspace = workspace;
+    this.onThink = onThink || onSpeak || (() => {});
+    this.onSpeakAloud = onSpeakAloud || (async () => {
+      throw new Error("there is no other living agent to hear the words");
+    });
+    // Kept only so historical `speak` actions remain reproducible. It is no
+    // longer an affordance presented to a life.
     this.onSpeak = onSpeak || (() => {});
     this.onEnd = onEnd || (() => {});
+    this.spawnProcess = spawnProcess || spawn;
     this.wakeAt = null;
   }
 
@@ -96,7 +105,7 @@ export class Body {
   // Each form says what it does, not just what it is called.
   affordances() {
     // Emotion is pluggable: feel() only exists when the operator has switched
-    // it on. It is offered right after speak() because it is the same kind of
+    // it on. It is offered after the two language actions because it is the same kind of
     // act — an utterance of hers — except this one fastens to the moment and
     // makes it last. When off, nothing here mentions feeling at all.
     // Words live in voice.mjs; this method only decides which forms appear and
@@ -104,8 +113,18 @@ export class Body {
     // the rest of the runtime expects.
     const a = VOICE.actions;
     const setup = loadSetup(this.log);
+    const momentFree = setup.format === "faculties";
     const pair = (one) => [one.form, one.does];
-    const feeling = setup.emotion ? [pair(a.feel)] : [];
+    const feeling = setup.emotion
+      ? [[a.feel.form, momentFree
+        ? "records a named feeling with these words; its intensity is a number from 0 to 1"
+        : a.feel.does]]
+      : [];
+    // Intention is pluggable like emotion: the switch controls whether the
+    // state vocabulary exists; every actual goal still has to be model-authored.
+    const intending = setup.intention
+      ? [pair(a.intend), pair(a.progress), pair(a.resolve)]
+      : [];
     // draw() exists only when a finite-life ledger has been seeded. With none,
     // her life is unbounded and there is no reserve, so offering the form would
     // be naming a reach that goes nowhere — a lie with a shape. See runtime.mjs.
@@ -114,17 +133,25 @@ export class Body {
     // entry can only carry one wording, so the real interval is stitched in here
     // — otherwise a reconfigured sleepSeconds would leave the room telling her a
     // duration that sleep() does not honour.
-    const sleepSeconds = Number(setup.sleepSeconds) || 120;
-    const sleepPair = ["sleep()", `sets the next moment for ${sleepSeconds} seconds later`];
+    const sleepSeconds = Number(setup.sleepSeconds) || 10;
+    const sleepPair = ["sleep()", momentFree
+      ? `rests for ${sleepSeconds} seconds`
+      : `sets the next moment for ${sleepSeconds} seconds later`];
+    const sleeping = setup.sleepEnabled !== false ? [sleepPair] : [];
     return [
-      pair(a.speak),
+      pair(a.think),
+      pair(a.identify),
+      pair(a.speak_aloud),
       ...feeling,
       pair(a.run),
+      pair(a.remember),
       pair(a.recall),
+      pair(a.revise),
       pair(a.shelve),
       pair(a.consolidate),
+      ...intending,
       ...drawing,
-      sleepPair,
+      ...sleeping,
       pair(a.forget),
       pair(a.end),
     ];
@@ -138,13 +165,27 @@ export class Body {
     try {
       let value;
       switch (name) {
+        case "think": value = await this.think(String(args[0] ?? "")); break;
+        case "identify": value = this.identify(String(args[0] ?? "")); break;
+        case "speak_aloud": value = await this.speakAloud(String(args[0] ?? "")); break;
+        // Historical records can still be replayed, although this name is no
+        // longer in the form list and therefore cannot be parsed as a new act.
         case "speak": value = await this.speak(String(args[0] ?? "")); break;
         case "feel": value = this.feel(String(args[0] ?? ""), args[1]); break;
+        case "remember": value = this.remember(String(args[0] ?? ""), String(args[1] ?? ""), String(args[2] ?? "")); break;
         case "recall": value = this.recall(String(args[0] ?? "")); break;
+        case "revise": value = this.revise(String(args[0] ?? ""), String(args[1] ?? "")); break;
         case "shelve": value = this.shelve(String(args[0] ?? "")); break;
         case "consolidate": value = this.consolidate(String(args[0] ?? "")); break;
+        case "intend": value = this.intend(String(args[0] ?? ""), String(args[1] ?? ""), String(args[2] ?? "")); break;
+        case "progress": value = this.progressIntent(String(args[0] ?? ""), String(args[1] ?? ""), String(args[2] ?? ""), String(args[3] ?? "")); break;
+        case "resolve": value = this.resolveIntent(String(args[0] ?? ""), args[1], String(args[2] ?? "")); break;
         case "draw": value = this.draw(Number(args[0])); break;
-        case "sleep": value = this.sleep(); break;
+        case "sleep": {
+          if (!this.formNames().includes("sleep")) return failed(VOICE.messages.noSuchForm(name));
+          value = this.sleep();
+          break;
+        }
         case "run": value = await this.runShell(String(args[0] ?? "")); break;
         case "ls": value = await this.ls(); break;
         case "write": value = await this.write(String(args[0] ?? ""), String(args[1] ?? "")); break;
@@ -175,20 +216,46 @@ export class Body {
     // DEBIAN_FRONTEND=noninteractive stops apt blocking on a Y/n prompt it can
     // never receive — there is no terminal, so an interactive read gets EOF.
     const timeout = Number(process.env.AMI_SHELL_TIMEOUT) || 300;
-    const remote = process.env.AMI_SHELL_EXEC
-      || `export LIMA_HOME=$HOME/.lima; $HOME/lima/bin/limactl shell box timeout ${timeout} env DEBIAN_FRONTEND=noninteractive bash -s`;
-    const out = await new Promise((resolve) => {
-      const p = spawn("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, remote],
+    const remote = process.env.AMI_SHELL_EXEC || limaShellCommand({ timeoutSeconds: timeout });
+    // The guest timeout bounds the submitted foreground script. This second,
+    // local bound protects the transport itself: a leaked remote file
+    // descriptor used to keep `ssh` open forever even after timeout had killed
+    // the foreground shell.
+    const configuredTransportMs = Number(process.env.AMI_SHELL_TRANSPORT_TIMEOUT_MS);
+    const transportMs = Number.isFinite(configuredTransportMs) && configuredTransportMs > 0
+      ? configuredTransportMs
+      : (timeout + 15) * 1000;
+    const execution = await new Promise((resolve) => {
+      const p = this.spawnProcess("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, remote],
         { stdio: ["pipe", "pipe", "pipe"] });
       let buf = "";
+      let settled = false;
+      const finish = (timedOut = false) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(guard);
+        resolve({ out: buf, timedOut });
+      };
       p.stdout.on("data", (d) => (buf += d));
       p.stderr.on("data", (d) => (buf += d));
-      p.on("close", () => resolve(buf));
-      p.on("error", (e) => resolve(String(e.message)));
+      p.on("close", () => finish(false));
+      p.on("error", (e) => {
+        buf += String(e.message);
+        finish(false);
+      });
+      const guard = setTimeout(() => {
+        p.kill("SIGTERM");
+        finish(true);
+      }, transportMs);
       p.stdin.write(cmd);
       p.stdin.end();
     });
+    const out = execution.out;
     const text = out.slice(0, READ_LIMIT).replace(/\s+$/, "");
+    if (execution.timedOut) {
+      return failed(`shell transport did not close within ${Math.ceil(transportMs / 1000)} seconds`,
+        text ? { output: text } : {});
+    }
     return out.length > READ_LIMIT
       ? success({ output: text, of: out.length, remaining: out.length - READ_LIMIT })
       : success({ output: text });
@@ -196,11 +263,56 @@ export class Body {
 
   async speak(text) {
     const spoken = text.trim();
-    if (!spoken) return failed(VOICE.messages.speakNeedsText);
+    if (!spoken) return failed(VOICE.messages.thinkNeedsText);
     this.onSpeak(spoken);
     // This proves only that the runtime accepted the speech action. It does
     // not observe a listener, hearing, attention, or any external response.
     return success({ characters: spoken.length });
+  }
+
+  async think(text) {
+    const thought = text.trim();
+    if (!thought) return failed(VOICE.messages.thinkNeedsText);
+    await this.onThink(thought);
+    return success({ characters: thought.length });
+  }
+
+  identify(text) {
+    const identity = String(text || "").trim();
+    if (!identity) return failed(VOICE.messages.identityNeedsText);
+    return result(this.log.identify(identity));
+  }
+
+  remember(kind, text, cue = "") {
+    const named = String(kind || "").trim();
+    const content = String(text || "").trim();
+    if (!named) return failed(VOICE.messages.rememberNeedsKind);
+    if (!content) return failed(VOICE.messages.rememberNeedsText);
+    return result(this.log.remember(named, content, cue));
+  }
+
+  revise(query, text) {
+    const named = String(query || "").trim();
+    const content = String(text || "").trim();
+    if (!named) return failed(VOICE.messages.reviseNeedsMemory);
+    if (!content) return failed(VOICE.messages.reviseNeedsText);
+    const matches = this.log.revisableMemories(named);
+    if (!matches.length) return failed(VOICE.messages.reviseNoMatch(named));
+    if (matches.length > 1) {
+      const options = matches.map((row) => `· ${firstLine(row.content)}`).join("\n");
+      return failed(VOICE.messages.reviseAmbiguous(named, options));
+    }
+    return result(this.log.revise(matches[0].id, content));
+  }
+
+  async speakAloud(text) {
+    const spoken = text.trim();
+    if (!spoken) return failed(VOICE.messages.speakAloudNeedsText);
+    const heard = await this.onSpeakAloud(spoken);
+    return success({
+      characters: spoken.length,
+      ...(heard && typeof heard === "object" ? heard : {}),
+    });
   }
 
   // She names a feeling and how strongly it runs, and it fastens to the words
@@ -212,6 +324,33 @@ export class Body {
     const feeling = String(emotion || "").trim();
     if (!feeling) return failed(VOICE.messages.feelNeedsEmotion);
     return result(this.log.feel(feeling, intensity));
+  }
+
+  // She commits to a goal that stands across moments — held in the INTENTION
+  // view until she resolves it. Nothing is intended unless she says it is.
+  intend(text, success = "", cue = "") {
+    const goal = String(text || "").trim();
+    if (!goal) return failed(VOICE.messages.intendNeedsText);
+    return result(this.log.intend(goal, success, cue));
+  }
+
+  progressIntent(query, evidence, next = "", cue = "") {
+    const ref = String(query || "").trim();
+    const observed = String(evidence || "").trim();
+    if (!ref) return failed(VOICE.messages.progressNeedsRef);
+    if (!observed) return failed(VOICE.messages.progressNeedsEvidence);
+    const advanced = this.log.progress(ref, observed, next, cue);
+    return advanced?.note ? failed(advanced.note) : result(advanced);
+  }
+
+  // She ends a standing intention — done, or dropped. The goal is not deleted;
+  // it becomes an ordinary memory recording how it ended. Named resolveIntent,
+  // not resolve, to avoid colliding with the workspace path resolver below.
+  resolveIntent(query, outcome, evidence = "") {
+    const ref = String(query || "").trim();
+    if (!ref) return failed(VOICE.messages.resolveNeedsRef);
+    const done = this.log.resolve(ref, outcome, evidence);
+    return done?.note ? failed(done.note) : result(done);
   }
 
   // A letter, kept and carried to the timeline.
@@ -255,11 +394,19 @@ export class Body {
       // row id and any source ids remain in the record for shelve/consolidate
       // to resolve against and for audit — never surfaced to her as a handle.
       units: rows.map((row) => {
-        const whole = row.kind === "action" && row.result
+        const resolution = row.meta?.resolution;
+        const whole = resolution
+          ? `${row.content}\noutcome: ${resolution.outcome || "done"}${resolution.evidence ? `\nevidence: ${resolution.evidence}` : ""}`
+          : row.kind === "action" && row.result
           ? `${row.content}\nreturned:\n${this.log.modelResult(row)}`
           : row.content;
         const shown = whole;
-        const unit = { at: row.at, kind: row.kind, state: row.state, content: shown };
+        const unit = {
+          at: row.at,
+          kind: row.kind === "memory" ? (row.meta?.mental || "memory") : row.kind,
+          state: row.state,
+          content: shown,
+        };
         if (shown.length < whole.length) unit.of = whole.length;
         return unit;
       }),
@@ -346,7 +493,12 @@ export class Body {
       row.state === "active"
       && !(world && row.id > world.id)
       && (row.kind === "incoming"
-        || (row.kind === "memory" && !(row.meta?.sources?.length > 0))
+        || row.kind === "emission"
+        || (row.kind === "memory"
+          && !(row.meta?.sources?.length > 0)
+          && !row.meta?.authored
+          && !row.meta?.intention
+          && row.meta?.mental !== "identity")
         || (row.kind === "action" && row.result && !isMemoryTransition(row.meta?.name))));
     if (!scratch.length) return failed(VOICE.messages.consolidateNothing);
     const folded = scratch.map((row) => firstLine(row.content));
@@ -364,7 +516,7 @@ export class Body {
   }
 
   sleep() {
-    const seconds = Number(loadSetup(this.log).sleepSeconds) || 120;
+    const seconds = Number(loadSetup(this.log).sleepSeconds) || 10;
     this.wakeAt = new Date(Date.now() + seconds * 1000);
     this.wakeWhy = "";
     this.log.set("wake_why", "");

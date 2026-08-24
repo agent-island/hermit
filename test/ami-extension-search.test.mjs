@@ -34,21 +34,17 @@ test("extension search exposes only query jobs and sanitised result lists", asyn
   });
 });
 
-test("the extension does not widen her browser actions or website access", async () => {
+test("the extension bridge does not silently add browser-control actions", async () => {
   const forms = new Body({ log: { get: (key, fallback) => fallback } }).formNames();
-  assert.equal(forms.includes("search"), true);
-  assert.equal(forms.includes("open"), true);
-  assert.equal(forms.includes("read_source"), true);
-  for (const forbidden of ["browse", "click", "type", "submit", "back", "tab"]) {
+  for (const forbidden of ["search", "open", "read_source", "browse", "click", "type", "submit", "back", "tab"]) {
     assert.equal(forms.includes(forbidden), false);
   }
 
   const manifest = JSON.parse(await readFile(new URL("../extension/manifest.json", import.meta.url)));
   // She still has no "tabs" permission — the extension cannot enumerate or
   // manage her tabs. It does hold <all_urls>, because open()/read_source() let
-  // her fetch any one page and reading it means running a scrape script in that
-  // page; that host breadth is for reading, not for widening her actions, which
-  // stay the same three: search, open, read_source.
+  // the observer-side bridge can fetch and scrape a page. That permission does
+  // not make the bridge's operations model-facing faculties.
   assert.equal(manifest.permissions.includes("tabs"), false);
   assert.equal(manifest.host_permissions.includes("<all_urls>"), true);
 });

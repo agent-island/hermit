@@ -1,6 +1,6 @@
 import path from "node:path";
 import { rm, mkdir, writeFile } from "node:fs/promises";
-import { DEFAULT_SETUP, loadSetup } from "./setup.mjs";
+import { loadSetup } from "./setup.mjs";
 
 // Put her back exactly as she was at a chosen moment, and let it run again.
 //
@@ -50,14 +50,15 @@ export async function rewind(log, workspace, toId) {
           ? lastSetup.meta.heartbeat
           : currentSetup.heartbeat,
       }
-    : { ...DEFAULT_SETUP });
+    : { ...currentSetup });
 
   // Her workspace as her own hands left it at that point.
   await rm(workspace, { recursive: true, force: true });
   await mkdir(workspace, { recursive: true });
   let files = 0;
-  for (const event of log.since(0, 1_000_000)) {
+  for (const event of log.units()) {
     if (event.kind !== "action" || event.meta?.name !== "write") continue;
+    if (!event.result || event.result.meta?.yielded === false || event.result.meta?.value?.status === "failed") continue;
     const [name, text] = event.meta.args || [];
     if (typeof name !== "string") continue;
     const file = path.resolve(workspace, String(name).replace(/^\/+/, ""));
@@ -67,7 +68,7 @@ export async function rewind(log, workspace, toId) {
     files += 1;
   }
 
-  return { removed, remaining: log.count(), files, at: lastWorld?.at ?? null, room: lastSetup ? "restored to the one in force then" : "restored to the default" };
+  return { removed, remaining: log.count(), files, at: lastWorld?.at ?? null, room: lastSetup ? "restored to the one in force then" : "the authored room remained in force" };
 }
 
 // Somewhere worth going back to: every moment, with the first thing she said
@@ -88,7 +89,7 @@ export function points(log) {
     }
     if (event.kind === "action") {
       current.calls.push(event.meta?.name);
-      if (event.meta?.name === "speak") current.spoke = true;
+      if (["speak", "think", "speak_aloud"].includes(event.meta?.name)) current.spoke = true;
     }
   }
   return list;

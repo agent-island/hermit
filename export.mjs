@@ -123,14 +123,15 @@ const ev = DATA.events;
 const first = ev[0], last = ev[ev.length-1];
 const moments = ev.filter(e=>e.kind==="world").length;
 const calls = ev.filter(e=>e.kind==="action").length;
-const spoke = ev.filter(e=>e.kind==="action"&&e.meta.name==="speak").length;
+const thought = ev.filter(e=>e.kind==="action"&&(e.meta.name==="speak"||e.meta.name==="think")).length;
+const spoke = ev.filter(e=>e.kind==="action"&&e.meta.name==="speak_aloud").length;
 const alive = first&&last ? (new Date(last.at)-new Date(first.at))/1000 : 0;
 const dur = s => s<60?Math.round(s)+"s":s<3600?Math.round(s/60)+"m":(s/3600).toFixed(1)+"h";
 document.getElementById("sub").textContent = first
   ? "born "+first.at.replace("T"," ").slice(0,19)+"Z · "+ev.length+" events recorded, nothing edited or removed"
   : "nothing has happened yet";
 document.getElementById("tiles").innerHTML = [
-  [moments,"moments"],[calls,"calls made"],[spoke,"times spoke"],
+  [moments,"moments"],[calls,"calls made"],[thought,"inner thoughts"],[spoke,"times spoke aloud"],
   [ev.filter(e=>e.kind==="incoming").length,"spoken to"],
   [ev.filter(e=>e.kind==="echo").length,"rooms echoed"],
   [ev.filter(e=>e.kind==="action"&&e.meta.name==="write").length,"things made"],
@@ -138,8 +139,8 @@ document.getElementById("tiles").innerHTML = [
 ].map(([v,k])=>'<div class="tile"><b>'+v+'</b><span>'+k+'</span></div>').join("");
 
 /* ---------- moments ---------- */
-const KINDS=["world","emission","echo","action","result","incoming","memory","shelf","body","sleep","error"];
-const hidden=new Set(["world"]);
+const KINDS=["world","reasoning","reasoning_details","emission","echo","action","result","incoming","memory","shelf","body","sleep","error","api","end"];
+const hidden=new Set(["world","api"]);
 let needle="";
 const bar=document.getElementById("bar");
 bar.innerHTML='<input type="search" id="q" placeholder="search everything she ever emitted">'

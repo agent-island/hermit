@@ -4,7 +4,7 @@
 // interpretation is inferred here.
 
 const FACT_TEXT_LIMIT = Infinity;
-const MEMORY_TRANSITIONS = new Set(["recall", "shelve", "consolidate", "feel", "forget"]);
+const MEMORY_TRANSITIONS = new Set(["remember", "recall", "revise", "shelve", "consolidate", "feel", "forget", "identify", "intend", "progress", "resolve"]);
 
 // These actions already persist as the transition they cause. Giving shelf()
 // a second active episode would replace every shelved unit with a memory of
@@ -12,6 +12,23 @@ const MEMORY_TRANSITIONS = new Set(["recall", "shelve", "consolidate", "feel", "
 // consolidation is represented by the sourced memory it creates.
 export function isMemoryTransition(name) {
   return MEMORY_TRANSITIONS.has(String(name || ""));
+}
+
+// One experience can carry several feelings without becoming several copies
+// of the experience. The exact feel() calls remain separate events in the
+// append-only record; this is only their model-facing projection onto the one
+// memory created for the emission they all name.
+export function withFeeling(meta = {}, emotion, intensity) {
+  const feeling = String(emotion || "").trim();
+  if (!feeling) return { ...meta };
+  const level = Math.round(Math.min(1, Math.max(0, Number(intensity) || 0)) * 100) / 100;
+  const feelings = Array.isArray(meta.feelings)
+    ? meta.feelings.map((one) => ({ emotion: String(one.emotion || ""), intensity: Number(one.intensity) || 0 }))
+    : (meta.emotion ? [{ emotion: String(meta.emotion), intensity: Number(meta.intensity) || 0 }] : []);
+  if (!feelings.some((one) => one.emotion === feeling && one.intensity === level)) {
+    feelings.push({ emotion: feeling, intensity: level });
+  }
+  return { ...meta, feelings };
 }
 
 function short(value, limit = FACT_TEXT_LIMIT) {
@@ -52,6 +69,14 @@ export function actionFact(action, outcome = {}) {
       return ok
         ? `recorded speech (${Number(value.characters) || String(args[0] ?? "").trim().length} characters)`
         : failed("speech recording");
+    case "think":
+      return ok
+        ? `recorded an inner thought (${Number(value.characters) || String(args[0] ?? "").trim().length} characters)`
+        : failed("inner thought recording");
+    case "speak_aloud":
+      return ok
+        ? `spoke aloud to ${short(value.receivedBy || "the other living agent")} (${Number(value.characters) || String(args[0] ?? "").trim().length} characters)`
+        : failed("speech to the other living agent");
     case "write": {
       const file = value.path || args[0] || "";
       return ok
@@ -96,11 +121,13 @@ export function actionFact(action, outcome = {}) {
     }
     case "feel":
       return ok
-        ? `felt ${short(value.emotion || args[0] || "")}${value.intensity ? ` (${value.intensity})` : ""}`
+        ? `felt ${short(value.emotion || args[0] || "")}${Number.isFinite(Number(value.intensity ?? args[1])) ? ` (${Number(value.intensity ?? args[1])})` : ""}`
         : failed("a feeling");
     case "sleep":
       return ok
-        ? `set the next moment for ${Number(value.seconds || args[0])} seconds later`
+        ? action?.format === "faculties"
+          ? `rested for ${Number(value.seconds || args[0])} seconds`
+          : `set the next moment for ${Number(value.seconds || args[0])} seconds later`
         : failed("sleep");
     case "ls":
       return ok ? `listed the workspace (${Array.isArray(value.files) ? value.files.length : 0} files)` : failed("workspace listing");
@@ -110,6 +137,17 @@ export function actionFact(action, outcome = {}) {
       return ok
         ? `let ${count ? `${count} ` : ""}memor${count === 1 ? "y" : "ies"} about ${phrase} go for good; they can no longer be recalled`
         : failed("letting memory go");
+    }
+    case "intend":
+      // A standing goal she chose to hold. The intention text has its own home
+      // in the memory unit; the fact only records that she set one.
+      return ok ? `set an intention — ${short(value.intention ?? args[0] ?? "")}` : failed("intending");
+    case "resolve": {
+      // Resolution does not delete the intention — it marks how it ended, and
+      // the goal becomes an ordinary memory she can consolidate, shelve, recall.
+      const goal = short(value.intention ?? args[0] ?? "");
+      const outcome = value.outcome === "dropped" ? "dropped" : "done";
+      return ok ? `resolved an intention (${outcome}) — ${goal}` : (note || failed("resolving"));
     }
     case "run": {
       // A real fact, not a paraphrase. Every part below is copied or counted
@@ -151,10 +189,34 @@ export function transitionMemory(state, event) {
     next.actions.set(event.id, event);
     return next;
   }
+  if (event.kind === "incoming" || event.kind === "emission") {
+    next.units.set(event.id, {
+      id: event.id,
+      at: event.at,
+      kind: event.kind,
+      state: "active",
+      content: event.content,
+      meta: { ...(event.meta || {}) },
+    });
+    return next;
+  }
   if (event.kind === "result") {
     const action = next.actions.get(Number(event.meta?.action));
     if (!action) return next;
-    if (isMemoryTransition(action.meta?.name)) return next;
+    if (isMemoryTransition(action.meta?.name)) {
+      if (action.meta?.name === "feel") {
+        const value = event.meta?.value && typeof event.meta.value === "object" ? event.meta.value : {};
+        const memoryId = Number(value.memory);
+        const memory = next.units.get(memoryId);
+        if (memory?.kind === "memory") {
+          next.units.set(memoryId, {
+            ...memory,
+            meta: withFeeling(memory.meta, value.emotion ?? action.meta?.args?.[0], value.intensity ?? action.meta?.args?.[1]),
+          });
+        }
+      }
+      return next;
+    }
     next.units.set(action.id, {
       id: action.id,
       at: action.at,
@@ -180,6 +242,7 @@ export function transitionMemory(state, event) {
       kind: "memory",
       state: "active",
       content: event.content,
+      meta: { ...(event.meta || {}) },
       sources: Array.isArray(event.meta?.sources) ? event.meta.sources : [],
     });
     return next;
@@ -198,6 +261,13 @@ export function transitionMemory(state, event) {
     const unit = next.units.get(id);
     if (unit) next.units.set(id, { ...unit, state: "forgotten", by: event.meta?.by || null });
   }
+  if (event.kind === "revise") {
+    const id = Number(event.meta?.target);
+    const unit = next.units.get(id);
+    if (unit && unit.state !== "forgotten") {
+      next.units.set(id, { ...unit, state: "revised", by: event.meta?.replacement || null });
+    }
+  }
   return next;
 }
 
@@ -206,7 +276,13 @@ export function memoryState(events) {
 }
 
 export function followingState(state) {
-  return [...state.units.values()].filter((unit) => unit.state === "active");
+  const units = [...state.units.values()];
+  const representedEmissions = new Set(units
+    .filter((unit) => unit.kind === "memory" && Number.isInteger(Number(unit.meta?.felt)))
+    .map((unit) => Number(unit.meta.felt)));
+  return units.filter((unit) =>
+    unit.state === "active"
+    && !(unit.kind === "emission" && representedEmissions.has(unit.id)));
 }
 
 // How many recent action units are shown with their real content. Older ones
@@ -221,6 +297,72 @@ export function followingState(state) {
 // tools are the memory management; context is the only wall.
 const RECENT_WINDOW = Infinity;
 
+// A durable state can name the circumstances in which it becomes relevant.
+// This is a small, deterministic retrieval layer rather than an interpretation
+// of meaning: exact cue text matches; otherwise one distinctive word (for a
+// one-word cue) or two distinctive words (for a longer cue) must occur in the
+// present. The raw archive and recall search remain complete regardless.
+const CUE_STOPWORDS = new Set([
+  "the", "a", "an", "of", "on", "in", "to", "and", "or", "for", "with",
+  "at", "by", "from", "is", "was", "are", "were", "this", "that", "when",
+  "if", "then", "it", "its", "about", "my", "i", "me",
+]);
+
+function cueWords(value) {
+  return String(value || "").toLocaleLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((word) => word.length >= 3 && !CUE_STOPWORDS.has(word));
+}
+
+export function cueMatches(cue, present) {
+  const wanted = String(cue || "").trim().toLocaleLowerCase();
+  const here = String(present || "").toLocaleLowerCase();
+  if (!wanted) return false;
+  if (["always", "continuous", "continuously"].includes(wanted)) return true;
+  if (!here) return false;
+  if (here.includes(wanted)) return true;
+  const words = [...new Set(cueWords(wanted))];
+  if (!words.length) return false;
+  const matched = words.filter((word) => here.includes(word)).length;
+  return matched >= Math.min(2, words.length);
+}
+
+// The model-facing foreground is not the archive. Self-authored durable states
+// without a cue remain present because the author chose no condition on them.
+// Cued durable states surface when the present matches. Unconsolidated episodes
+// remain foreground so consolidate() never folds experiences the model could
+// not see. Resolved intentions remain latent until recall; resolve() already
+// returns the outcome once, and the old cue-action binding is inactive.
+export function selectForegroundMemory(units, present = "") {
+  const foreground = [];
+  const latent = [];
+  for (const unit of units) {
+    const cue = String(unit.meta?.cue || "").trim();
+    const episode = unit.kind !== "memory" || !unit.meta?.authored;
+    const durable = unit.kind === "memory" && unit.meta?.authored && !unit.meta?.intention;
+    const visible = episode || (durable && (!cue || cueMatches(cue, present)));
+    (visible ? foreground : latent).push(unit);
+  }
+  return { foreground, latent };
+}
+
+export function latentMemoryLines(units) {
+  if (!units.length) return [];
+  const counts = new Map();
+  for (const unit of units) {
+    const kind = String(unit.meta?.mental || unit.meta?.name || unit.kind || "memory");
+    counts.set(kind, (counts.get(kind) || 0) + 1);
+  }
+  const attribute = (value) => String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  return [...counts].sort(([a], [b]) => a.localeCompare(b)).map(
+    ([kind, count]) => `<available kind="${attribute(kind)}" count="${count}"/>`
+  );
+}
+
 // A folded narrative reads as what it is: a short account, in prose. The
 // source ids that produced it are kept in meta for recall() and audit, but
 // never shown — a list of "#4721, #4723, #4731 …" is exactly the meaningless
@@ -228,14 +370,32 @@ const RECENT_WINDOW = Infinity;
 function narrativeBlock(unit) {
   const content = String(unit.content || "").trim();
   if (!content) return [];
+  if (unit.meta?.intention && unit.meta?.resolution) {
+    const resolution = unit.meta.resolution;
+    return [
+      `resolved intention: ${content}`,
+      `outcome: ${resolution.outcome || "done"}`,
+      ...(resolution.evidence ? [`evidence: ${resolution.evidence}`] : []),
+    ];
+  }
+  const mental = String(unit.meta?.mental || "").trim();
+  const prefix = mental && !["memory", "episode", "identity", "intention"].includes(mental)
+    ? `${mental}: `
+    : "";
   // A memory she felt carries the feeling on its face, so her past reads the
   // way memory does — coloured by what it meant to her, not flat. A memory she
   // wrote plainly (consolidate) has no emotion and shows as prose.
-  const feeling = unit.meta?.emotion
-    ? `felt ${unit.meta.emotion}${unit.meta.intensity ? ` (${unit.meta.intensity})` : ""}: `
+  const feelings = Array.isArray(unit.meta?.feelings) && unit.meta.feelings.length
+    ? unit.meta.feelings
+    : (unit.meta?.emotion ? [{ emotion: unit.meta.emotion, intensity: unit.meta.intensity }] : []);
+  const feeling = feelings.length
+    ? `felt ${feelings.map((one) => {
+      const level = Number(one.intensity);
+      return `${one.emotion}${Number.isFinite(level) ? ` (${level})` : ""}`;
+    }).join("; then ")}: `
     : "";
   const lines = content.split("\n").map((line) => line.trimEnd());
-  return [`${feeling}${lines[0]}`.trimEnd(), ...lines.slice(1)];
+  return [`${feeling}${prefix}${lines[0]}`.trimEnd(), ...lines.slice(1)];
 }
 
 // One recent action, shown by what it was, not by how long it was. Speech is
@@ -246,11 +406,11 @@ function narrativeBlock(unit) {
 // underground, so the number never has to surface here.
 function recentBlock(unit) {
   if (unit.kind === "memory") return narrativeBlock(unit);
-  if (unit.meta?.name === "speak") {
+  if (["speak", "think", "speak_aloud"].includes(unit.meta?.name)) {
     const said = String(unit.meta?.args?.[0] ?? "").replace(/\s+/g, " ").trim();
     if (said) {
       const shown = said;
-      return [`said: ${shown}`];
+      return [`${unit.meta?.name === "speak_aloud" ? "said aloud" : "thought"}: ${shown}`];
     }
   }
   return [unit.fact || "action completed"];

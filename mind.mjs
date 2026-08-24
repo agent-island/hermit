@@ -14,6 +14,15 @@
 import { ADAPTERS, endpointOf, buildRequest, readReply } from "./shapes.mjs";
 
 const DEFAULT_MODEL = "z-ai/glm-5.2";
+let lastRequestStartedAt = 0;
+
+async function waitForRequestInterval() {
+  const minimum = Math.max(0, Number(process.env.AMI_MIN_REQUEST_INTERVAL_MS) || 0);
+  if (!minimum) return;
+  const remaining = lastRequestStartedAt + minimum - Date.now();
+  if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
+  lastRequestStartedAt = Date.now();
+}
 
 export function configFromEnv(env = process.env, stored = {}) {
   // Prefill beats everything else here, so a prefill-capable endpoint wins
@@ -244,6 +253,11 @@ export async function emit(config, world, arrival = config.endpoint, onCall = nu
     run: config.run,
   });
 
+  // Optional process-local request ceiling. A pair gives each of its two
+  // processes a six-second minimum interval, so together they cannot begin
+  // more than twenty requests in any minute. The default is zero: ordinary
+  // lives are unchanged unless a launcher explicitly supplies the interval.
+  await waitForRequestInterval();
   const call = { url, mode, request, startedAt: new Date().toISOString() };
   const began = Date.now();
 
@@ -253,7 +267,11 @@ export async function emit(config, world, arrival = config.endpoint, onCall = nu
       method: "POST",
       headers: ADAPTERS[shape].headers(config.apiKey),
       body: JSON.stringify(request),
-      signal: AbortSignal.timeout(120_000),
+      // A high-effort reasoning model can think for minutes before its first
+      // token; 120s cut deepseek off mid-thought and burned the whole moment.
+      // Generous ceiling, env-overridable — long enough never to bite a real
+      // response, finite only so a genuinely hung request can't wedge the loop.
+      signal: AbortSignal.timeout(Number(process.env.AMI_REQUEST_TIMEOUT_MS) || 600_000),
     });
   } catch (error) {
     call.ms = Date.now() - began;

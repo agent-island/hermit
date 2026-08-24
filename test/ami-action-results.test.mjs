@@ -19,6 +19,8 @@ test("every affordance returns only the success-or-failed contract", async () =>
     },
     byId(id) { return sources.get(Number(id)) || null; },
     search() { return []; },
+    remember(kind, content) { return { kind, memory: content }; },
+    revisableMemories() { return []; },
     shelf(id) { return Number(id) === 7 ? { unit: 7, state: "shelved" } : { note: `there is no memory unit numbered ${id}` }; },
     consolidate(ids) { return { memory: 8, sources: ids }; },
     forget() { return 2; },
@@ -26,17 +28,28 @@ test("every affordance returns only the success-or-failed contract", async () =>
     set() {},
     // affordances()/sleep() read setup, and shelve()/consolidate() ask for the
     // last world; a minimal log must answer both or the contract check throws.
-    get(key, fallback) { return fallback; },
+    get(key, fallback) { return key === "setup_v2" ? { intention: true } : fallback; },
     last() { return null; },
     lastSpoke() { return { id: 1 }; },
     modelResult(unit) { return unit.result?.content || ""; },
   };
-  const body = new Body({ log, workspace: path.join(directory, "workspace") });
+  const privateThoughts = [];
+  const audibleSpeech = [];
+  const body = new Body({
+    log,
+    workspace: path.join(directory, "workspace"),
+    onThink: (text) => privateThoughts.push(text),
+    onSpeakAloud: async (text) => {
+      audibleSpeech.push(text);
+      return { receivedBy: "one" };
+    },
+  });
 
   try {
     const results = [
-      await body.run("speak", ["hello"]),
-      await body.run("speak", [""]),
+      await body.run("think", ["inside"]),
+      await body.run("think", [""]),
+      await body.run("speak_aloud", ["hello"]),
       await body.run("search", [""]),
       await body.run("open", ["not-a-url"]),
       await body.run("read_source", [999]),
@@ -61,11 +74,12 @@ test("every affordance returns only the success-or-failed contract", async () =>
       assert.equal("note" in value, false);
     }
 
-    const speech = results[0];
-    assert.deepEqual(speech, { status: "success", characters: 5 });
-    assert.equal("heard" in speech, false);
+    assert.deepEqual(results[0], { status: "success", characters: 6 });
+    assert.deepEqual(privateThoughts, ["inside"]);
+    assert.deepEqual(results[2], { status: "success", characters: 5, receivedBy: "one" });
+    assert.deepEqual(audibleSpeech, ["hello"]);
 
-    const letter = results[15];
+    const letter = results[16];
     assert.equal(letter.status, "success");
     assert.equal(letter.stored, "local");
     assert.equal("sent" in letter, false);
@@ -76,6 +90,30 @@ test("every affordance returns only the success-or-failed contract", async () =>
     // used to send to a real account is not merely disabled — it is not a
     // form, and the room never lists it.
     assert.equal(body.formNames().includes("message"), false);
+    assert.equal(body.formNames().includes("think"), true);
+    assert.equal(body.formNames().includes("speak_aloud"), true);
+    assert.equal(body.formNames().includes("speak"), false);
+    assert.deepEqual(body.affordances().find(([form]) => form === "think(text)"), ["think(text)", "think"]);
+    assert.deepEqual(body.affordances().find(([form]) => form === "speak_aloud(text)"), ["speak_aloud(text)", "speak aloud"]);
+    assert.deepEqual(body.affordances().find(([form]) => form === "identify(text)"), ["identify(text)", "identity"]);
+    assert.deepEqual(body.affordances().find(([form]) => form === "remember(kind, text, cue)"), [
+      "remember(kind, text, cue)",
+      "a memory of the named kind; an optional cue can bring it into foreground",
+    ]);
+    assert.deepEqual(body.affordances().find(([form]) => form === "revise(memory, text)"), ["revise(memory, text)", "revision of a matching memory"]);
+    assert.deepEqual(body.affordances().find(([form]) => form === "intend(goal, success, cue)"), [
+      "intend(goal, success, cue)",
+      "a standing intention with a success condition and an optional retrieval cue",
+    ]);
+    assert.deepEqual(body.affordances().find(([form]) => form === "progress(intention, evidence, next, cue)"), [
+      "progress(intention, evidence, next, cue)",
+      "evidence and the current next step of a standing intention",
+    ]);
+    assert.deepEqual(body.affordances().find(([form]) => form === "resolve(intention, outcome, evidence)"), ["resolve(intention, outcome, evidence)", "resolution"]);
+    const withoutPeer = new Body({ log, workspace: path.join(directory, "workspace") });
+    const notDelivered = await withoutPeer.run("speak_aloud", ["anyone?"]);
+    assert.equal(notDelivered.status, "failed");
+    assert.match(notDelivered.reason, /no other living agent/);
     assert.equal((await body.run("message", ["friend", "hi"])).status, "failed");
   } finally {
     await rm(directory, { recursive: true, force: true });

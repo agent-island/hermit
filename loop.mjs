@@ -1,6 +1,5 @@
 import { renderWorld } from "./world.mjs";
 import { loadSetup } from "./setup.mjs";
-import { tickPrompt, readTick } from "./tick.mjs";
 import {
   emit,
   canCountExactly,
@@ -12,6 +11,8 @@ import {
 import { loadRun, runFields } from "./run.mjs";
 import { actionFact } from "./memory-state.mjs";
 import { spendMoment } from "./runtime.mjs";
+import path from "node:path";
+import { blackboxFile, recordRaw } from "./blackbox.mjs";
 
 const ECHO_RETRY_SECONDS = 20;
 
@@ -20,6 +21,50 @@ const ECHO_RETRY_SECONDS = 20;
 // each one failing in the same way, none of them able to succeed. Backing off
 // costs her nothing — a moment that cannot happen is not a moment she lost.
 const BACKOFF_SECONDS = [30, 60, 120, 300, 600, 900];
+
+// A response can carry both a convenient plaintext trace and the provider's
+// lossless structured blocks. Preserve both. The raw API event is a third copy
+// at the transport boundary, so no parser change can erase the original later.
+export function appendReasoning(log, answer, meta = {}) {
+  const reasoningTokens = answer.usage?.completion_tokens_details?.reasoning_tokens
+    ?? answer.usage?.reasoning_tokens
+    ?? null;
+  const reasoningMeta = { ...meta, reasoningTokens };
+  if (answer.reasoningDetails != null) {
+    log.append("reasoning_details", JSON.stringify(answer.reasoningDetails, null, 2), reasoningMeta);
+  }
+  if (answer.reasoning) log.append("reasoning", answer.reasoning, reasoningMeta);
+}
+
+// The transport record has two independent homes. Always attempt both: a
+// failed black-box append must not prevent SQLite from receiving the response,
+// and a failed SQLite insert must not erase the append-only copy. If either
+// fails, surface it after the other copy has had its chance to land.
+export function preserveApiCall(log, blackbox, entry, meta = {}) {
+  let blackboxError = null;
+  let databaseError = null;
+  let saved = null;
+  try {
+    recordRaw(blackbox, entry);
+  } catch (error) {
+    blackboxError = error;
+  }
+  try {
+    saved = log.append("api", JSON.stringify(entry.call, null, 2), meta);
+  } catch (error) {
+    databaseError = error;
+  }
+  if (blackboxError || databaseError) {
+    throw new AggregateError(
+      [blackboxError, databaseError].filter(Boolean),
+      `model response preservation failed (${[
+        blackboxError ? "blackbox" : null,
+        databaseError ? "database" : null,
+      ].filter(Boolean).join(" and ")})`,
+    );
+  }
+  return saved;
+}
 
 // How long the room waits when she does not choose for herself. She can always
 // choose the same one-minute return with sleep(); this is only what happens
@@ -110,12 +155,17 @@ export function ledgerFrom(log) {
 }
 
 export class Loop {
-  constructor({ log, body, config, workspace, observer }) {
+  constructor({ log, body, config, workspace, observer, onLifeStopped = null }) {
     this.log = log;
     this.body = body;
     this.config = config;
     this.workspace = workspace;
     this.observer = observer;
+    this.onLifeStopped = onLifeStopped;
+    // Black box: an append-only mirror of every raw response, kept outside this
+    // life's folder so reuse, wipe, or rewind can never erase the raw record.
+    this.runId = new Date().toISOString();
+    this.blackbox = blackboxFile(path.dirname(log.file), config.model);
     this.timer = null;
     this.running = false;
     this.busy = false;
@@ -137,15 +187,28 @@ export class Loop {
     this.moment();
   }
 
-  stop() {
+  // Stop future moments without invalidating the response already in flight.
+  // Shutdown, reset, and rewind use this path so reasoning that has already
+  // begun is allowed to arrive and enter the append-only record.
+  quiesce() {
     this.running = false;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+  }
+
+  async waitUntilIdle() {
+    while (this.busy) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  stop() {
+    this.quiesce();
     this.epoch += 1;
     // A rewind used to leave this true forever if it landed mid-moment, and
     // every later moment returned immediately without ever rescheduling. She
     // simply stopped, with no error anywhere.
     this.busy = false;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
   }
 
   // Something said in the room while she is between moments brings the next
@@ -163,65 +226,13 @@ export class Loop {
     this.moment();
   }
 
-  // Between moments: one small question, almost no context. Anything that
-  // arrived skips this entirely — something happening is reason enough.
-  async beat() {
-    if (!this.running || this.busy) return;
-    const setup = loadSetup(this.log);
-    if (setup.heartbeat === false) return this.moment();
-    if (this.log.unanswered().length) return this.moment();
-
-    this.busy = true;
-    const epoch = this.epoch;
-    try {
-      const at = this.log.get("last_moment_at", null);
-      const files = await this.body.ls().then((r) => r.files).catch(() => []);
-      const prompt = tickPrompt({
-        now: new Date().toISOString(),
-        elapsed: at ? describeGap(Math.round((Date.now() - new Date(at)) / 1000)) : "no previous moment",
-        incoming: [],
-        why: this.log.get("wake_why", ""),
-        lastWords: this.log.lastCarriedEmission()?.content || "",
-        files,
-      });
-      // 24 was too tight. A model that reasons before answering spends the
-      // whole budget thinking and returns nothing, which reads as "wake" and
-      // silently makes the cheap tier pointless. A non-reasoning model under
-      // prefill answers in a word or two; this leaves room for one that does not.
-      const answer = await emit({ ...this.config, maxTokens: Number(process.env.AMI_BEAT_TOKENS || 64) }, prompt, setup.arrival, (call) =>
-        this.log.append("api", JSON.stringify(call, null, 2), {
-          mode: call.mode, status: call.status ?? null, ms: call.ms,
-          failed: call.failed ?? null, model: call.request?.model ?? null, tick: true,
-        }),
-      );
-      if (epoch !== this.epoch) return;
-      if (answer.reasoning) {
-        this.log.append("reasoning", answer.reasoning, { model: this.config.model, tick: true });
-      }
-      const decided = readTick(answer.text);
-      this.log.append("beat", decided.raw || "(nothing)", {
-        wake: decided.wake, seconds: decided.seconds ?? null,
-        tokens: answer.usage?.total_tokens ?? null,
-      });
-      this.failures = 0;
-      if (decided.wake) {
-        this.busy = false;
-        return this.moment();
-      }
-      this.body.wakeAt = new Date(Date.now() + decided.seconds * 1000);
-    } catch (error) {
-      this.failures = (this.failures || 0) + 1;
-      this.log.append("error", String(error.message), { stage: "beat", consecutive: this.failures });
-    } finally {
-      if (epoch === this.epoch) this.busy = false;
-    }
-    if (epoch !== this.epoch) return;
-    this.scheduleNext();
-  }
-
   async moment() {
     if (!this.running || this.busy) return;
     this.busy = true;
+    // A continuation earns another scheduled continuation through an actual
+    // transition. Mere passage of time is not activity and no longer causes a
+    // full model call by itself.
+    this.continueAfterMoment = false;
     const epoch = this.epoch;
     const now = new Date();
     try {
@@ -235,6 +246,7 @@ export class Loop {
       if (life.died) {
         this.log.append("end", "no moments left to spend", { by: "exhaustion", reserve: life.reserve });
         this.stop();
+        await this.onLifeStopped?.("ended-by-exhaustion");
         return;
       }
       // Not "since last seen" — since she last replied to anyone. Being shown
@@ -285,14 +297,18 @@ export class Loop {
       // Written whether the call succeeds, fails, times out, or belongs to a
       // life that has since been rewound. The api record is never conditional
       // on the outcome.
-      const keepCall = (call) =>
-        this.log.append("api", JSON.stringify(call, null, 2), {
+      const keepCall = (call) => {
+        return preserveApiCall(this.log, this.blackbox, {
+          at: new Date().toISOString(), run: this.runId, call,
+        }, {
           mode: call.mode,
           status: call.status ?? null,
           ms: call.ms,
           failed: call.failed ?? null,
           model: call.request?.model ?? null,
+          run: this.runId,
         });
+      };
       try {
         const run = loadRun(this.log);
         const prepared = await preparePrompt({
@@ -323,9 +339,7 @@ export class Loop {
         // once landed in a newborn and called end() with her hands.
         if (epoch !== this.epoch) return;
         emission = answer.text;
-        if (answer.reasoning) {
-          this.log.append("reasoning", answer.reasoning, { model: this.config.model });
-        }
+        appendReasoning(this.log, answer, { model: this.config.model });
         if (answer.finish === "length") {
           this.log.append("error", "the thought was cut off before it finished", { stage: "length" });
         }
@@ -396,10 +410,14 @@ export class Loop {
         });
       }
       const calls = wholeMenu ? [] : parsed.filter((call) => !isCitation(call));
+      this.continueAfterMoment = calls.some((call) => !["sleep", "end"].includes(call.name))
+        || missedUnread.length > 0;
       const results = [];
       for (const call of calls) {
         if (epoch !== this.epoch) return;
-        const action = this.log.append("action", call.source, { name: call.name, args: call.args });
+        const action = this.log.append("action", call.source, {
+          name: call.name, args: call.args, format: setup.format || "plain",
+        });
         try {
           const value = await this.body.run(call.name, call.args);
           const yielded = value?.status !== "failed" && !value?.note;
@@ -454,17 +472,27 @@ export class Loop {
   // section. A recall result is deliberately absent here: it is returned for
   // one moment, but recalling a shelved unit does not reactivate it.
   history() {
-    return this.log.units()
+    const units = this.log.units();
+    // Historical actions can outlive a later change to the current affordance
+    // list. Their exact call blocks still belong to those action units, not as
+    // a second full copy inside the raw emission.
+    const known = [...new Set([
+      ...this.body.formNames(),
+      ...units.filter((unit) => unit.kind === "action").map((unit) => unit.meta?.name).filter(Boolean),
+    ])];
+    return units
       .filter((unit) => unit.state === "active" && unit.kind !== "memory")
-      .map((unit) => historyUnit(unit, this.body.formNames()))
+      .map((unit) => historyUnit(unit, known))
       .filter(Boolean)
       .join("");
   }
 
   scheduleNext() {
     if (!this.running) return;
-    // Her sleep call chooses the fixed one-minute return. With no call, the
-    // room's own default applies.
+    // sleep() creates its own future event. Ordinary activity receives another
+    // continuation after the configured pacing interval. With neither, the
+    // life is idle and waits for an incoming event; a timer alone never creates
+    // a new demand for words.
     const chosen = this.body.wakeAt;
     this.body.wakeAt = null;
     // A moment that came back as a regenerated room was not a moment she
@@ -487,6 +515,14 @@ export class Loop {
       this.timer.unref?.();
       return;
     }
+    if (!chosen && !this.echoed && !this.continueAfterMoment) {
+      this.timer = null;
+      this.nextWakeAt = null;
+      this.log.append("idle", "no return is scheduled; an incoming event can continue this life", {
+        eventDriven: true,
+      });
+      return;
+    }
     const at = this.echoed
       ? new Date(Date.now() + ECHO_RETRY_SECONDS * 1000)
       : chosen || new Date(Date.now() + defaultGapSeconds(new Date(), loadSetup(this.log).gapSeconds) * 1000);
@@ -496,7 +532,7 @@ export class Loop {
       seconds: Math.round(delay / 1000),
       chosen: Boolean(chosen),
     });
-    this.timer = setTimeout(() => this.beat(), delay);
+    this.timer = setTimeout(() => this.moment(), delay);
     this.timer.unref?.();
   }
 }

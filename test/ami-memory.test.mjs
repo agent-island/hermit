@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import { Body } from "../body.mjs";
 import { Loop } from "../loop.mjs";
 import { DEFAULT_SETUP, loadSetup } from "../setup.mjs";
 import { renderWorld } from "../world.mjs";
+import { rewind } from "../rewind.mjs";
 
 async function withLog(run) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "ami-memory-"));
@@ -28,7 +29,7 @@ test("shelf keeps exact units recallable and keeps action with its result", asyn
     const oldAction = log.append("action", 'read("old.txt")', { name: "read", args: ["old.txt"] });
     log.append("result", "legacy result without an action pointer", { name: "read" });
 
-    assert.equal(log.search(String(action.id))[0].result.content, "path: door.txt\ntext: painted red");
+    assert.equal(log.unit(action.id).result.content, "path: door.txt\ntext: painted red");
     assert.equal(log.search("painted red")[0].id, action.id);
     assert.equal(log.unit(oldAction.id).result.content, "legacy result without an action pointer");
 
@@ -40,7 +41,7 @@ test("shelf keeps exact units recallable and keeps action with its result", asyn
     log.shelf(action.id);
     assert.equal(log.unit(action.id).state, "shelved");
     assert.equal(log.unit(action.id).result.content, "path: door.txt\ntext: painted red");
-    assert.equal(log.search(String(thought.id))[0].state, "active");
+    assert.equal(log.unit(thought.id).state, "active");
 
     log.append("world", "a new moment has begun");
     const unseen = log.append("emission", "this id did not exist when the moment began");
@@ -127,6 +128,145 @@ test("consolidate folds episodic scratch AND feel-snapshots, sparing authored co
   });
 });
 
+test("several feelings attach to one emission without copying its memory", async () => {
+  await withLog((log, directory) => {
+    const body = new Body({ log, workspace: directory });
+    log.append("world", "the room before the experience");
+    const emission = log.append("emission", "One experience, present only once.");
+
+    const recordFeeling = (emotion, intensity) => {
+      const action = log.append("action", `feel(${JSON.stringify(emotion)}, ${intensity})`, {
+        name: "feel", args: [emotion, intensity],
+      });
+      const value = body.feel(emotion, intensity);
+      log.append("result", "felt", { name: "feel", action: action.id, value, yielded: true });
+      return value;
+    };
+
+    const first = recordFeeling("surprise", 0.6);
+    const second = recordFeeling("equanimity", 0.7);
+    const third = recordFeeling("surprise", 0.6);
+
+    assert.equal(first.memory, second.memory);
+    assert.equal(second.memory, third.memory);
+    assert.equal(log.recent("memory", 100).length, 1);
+    assert.equal(log.units().some((unit) => unit.id === emission.id), false);
+    const [memory] = log.activeMemories();
+    assert.equal(memory.content, emission.content);
+    assert.deepEqual(memory.meta.feelings, [
+      { emotion: "surprise", intensity: 0.6 },
+      { emotion: "equanimity", intensity: 0.7 },
+    ]);
+
+    const whilePrevious = renderWorld({
+      now: new Date(), previousAt: null, body, log, setup: DEFAULT_SETUP,
+      incoming: [], results: [], previous: emission, files: [],
+    });
+    assert.equal(whilePrevious.match(/One experience, present only once\./g)?.length, 1);
+    assert.match(whilePrevious, /<last>\n    One experience, present only once\./);
+
+    const afterPrevious = renderWorld({
+      now: new Date(), previousAt: null, body, log, setup: DEFAULT_SETUP,
+      incoming: [], results: [], previous: { id: 9999, content: "A later experience." }, files: [],
+    });
+    assert.equal(afterPrevious.match(/One experience, present only once\./g)?.length, 1);
+    assert.match(afterPrevious, /felt surprise \(0\.6\); then equanimity \(0\.7\): One experience/);
+  });
+});
+
+test("consolidation folds an unfelt emission out of conversation memory", async () => {
+  await withLog((log, directory) => {
+    const body = new Body({ log, workspace: directory });
+    log.append("world", "first room");
+    const thought = log.append("emission", "A raw thought that needs folding.");
+    log.append("world", "second room");
+
+    const loop = new Loop({ log, body, config: {}, workspace: directory, observer: {} });
+    assert.match(loop.history(), /A raw thought that needs folding/);
+    const folded = body.consolidate("The thought became one concise understanding.");
+    assert.equal(folded.status, "success");
+    assert.equal(folded.kept, 1);
+    assert.equal(log.unit(thought.id).state, "shelved");
+    assert.doesNotMatch(loop.history(), /A raw thought that needs folding/);
+    assert.ok(log.activeMemories().some((memory) => memory.content === "The thought became one concise understanding."));
+  });
+});
+
+test("forgotten thoughts and incoming words do not return through another view", async () => {
+  await withLog((log, directory) => {
+    const body = new Body({ log, workspace: directory });
+    log.append("world", "first room");
+    const thought = log.append("emission", "A thought with the unique word celadon.");
+    const incoming = log.append("incoming", "A message with the unique word vermilion.", { from: "friend" });
+    log.append("world", "second room");
+
+    assert.equal(body.forget("celadon").status, "success");
+    assert.equal(body.forget("vermilion").status, "success");
+    assert.equal(log.unit(thought.id).state, "forgotten");
+    assert.equal(log.lastCarriedEmission(), null);
+    assert.equal(log.unanswered().some((row) => row.id === incoming.id), false);
+    assert.equal(log.search("celadon").length, 0);
+    assert.equal(log.search("vermilion").length, 0);
+  });
+});
+
+test("active incoming memory is not silently capped", async () => {
+  await withLog((log) => {
+    for (let index = 0; index < 240; index += 1) {
+      log.append("incoming", `message ${index}`, { from: "friend" });
+    }
+    const incoming = log.unanswered();
+    assert.equal(incoming.length, 240);
+    assert.equal(incoming[0].content, "message 0");
+    assert.equal(incoming.at(-1).content, "message 239");
+  });
+});
+
+test("recall searches content rather than hidden ids and does not stop at eight", async () => {
+  await withLog((log, directory) => {
+    const body = new Body({ log, workspace: directory });
+    const unrelated = log.append("incoming", "an unrelated memory", { from: "friend" });
+    assert.equal(log.search(String(unrelated.id)).length, 0);
+    for (let index = 0; index < 12; index += 1) {
+      log.append("incoming", `shared recall phrase, occurrence ${index}`, { from: "friend" });
+    }
+    const recalled = body.recall("shared recall phrase");
+    assert.equal(recalled.status, "success");
+    assert.equal(recalled.found, 12);
+    assert.equal(recalled.units.length, 12);
+  });
+});
+
+test("forgotten content cannot be rebuilt through low-level consolidation", async () => {
+  await withLog((log) => {
+    const source = log.append("incoming", "This memory has been forgotten.", { from: "friend" });
+    log.forget(source.id);
+    const before = log.countOf("memory");
+    const outcome = log.consolidate([source.id], "This must not resurrect it.");
+    assert.match(outcome.note, /none of those were memory units available/);
+    assert.equal(log.countOf("memory"), before);
+  });
+});
+
+test("rewind preserves the authored room and does not replay failed writes", async () => {
+  await withLog(async (log, directory) => {
+    log.set("setup_v2", { ...DEFAULT_SETUP, template: "MY EXACT AUTHORED ROOM\n  {{time}}" });
+    log.append("world", "a room");
+    const write = log.append("action", 'write("ghost.txt", "never existed")', {
+      name: "write", args: ["ghost.txt", "never existed"],
+    });
+    const failed = log.append("result", "status: failed", {
+      name: "write", action: write.id,
+      value: { status: "failed", reason: "write failed" }, yielded: false,
+    });
+    log.append("emission", "later history to remove");
+
+    await rewind(log, directory, failed.id);
+    assert.equal(loadSetup(log).template, "MY EXACT AUTHORED ROOM\n  {{time}}");
+    await assert.rejects(readFile(path.join(directory, "ghost.txt"), "utf8"), /ENOENT/);
+  });
+});
+
 test("conversation history omits shelved units and does not perpetuate recalled content", async () => {
   await withLog((log) => {
     log.append("world", "first room");
@@ -194,14 +334,14 @@ test("the room she reads carries content, not unit numbers, and only active long
     // no "from #source". The provenance stays in the record's meta for audit.
     assert.match(world, /A durable understanding/);
     assert.doesNotMatch(world, /from #/);
-    assert.match(world, /MEMORY\n  maintained: 321 tokens\n  remains: 999,679 tokens/);
+    assert.match(world, /<foreground_memory>\n    maintained: 321 tokens\n    remains: 999,679 tokens/);
     assert.doesNotMatch(world, /TOKENS\n/);
-    assert.ok(world.indexOf("ACTIONS") < world.indexOf("INCOMING"));
+    assert.ok(world.indexOf("<faculties>") < world.indexOf("<heard>"));
     // Incoming words, returned facts, and her last thought all read as content
     // with a time, never as "#id" — nothing she reads is addressed by number.
-    assert.match(world, /INCOMING\n  \d\d:\d\d:\d\dZ  cy: hello/);
-    assert.match(world, /RETURNED\n  read\("x"\)/);
-    assert.match(world, /PREVIOUS\n  last thought/);
+    assert.match(world, /<heard>\n    \d\d:\d\d:\d\dZ  cy: hello/);
+    assert.match(world, /<returned call="read\(&quot;x&quot;\)">/);
+    assert.match(world, /<last>\n    last thought/);
     assert.doesNotMatch(world, /#\d/);
 
     log.shelf(made.memory);
@@ -211,6 +351,208 @@ test("the room she reads carries content, not unit numbers, and only active long
       incoming: [], results: [], previous: null, files: [],
     });
     assert.doesNotMatch(without, /A durable understanding/);
+  });
+});
+
+test("the current transition stays in last and returned while standing intentions remain visible", async () => {
+  await withLog((log) => {
+    const older = log.append("action", 'think("older")', { name: "think", args: ["older"] });
+    log.append("result", "status: success\ncharacters: 5", {
+      name: "think", action: older.id, yielded: true, fact: "older action fact",
+    });
+    const previous = log.append("emission", 'think("current")');
+    const current = log.append("action", 'think("current")', { name: "think", args: ["current"] });
+    log.append("result", "status: success\ncharacters: 7", {
+      name: "think", action: current.id, yielded: true, fact: "current action fact",
+    });
+    log.intend("continue the conversation");
+
+    const setup = {
+      ...DEFAULT_SETUP,
+      format: "faculties",
+      template: `<intentions>\n  {{intentions}}\n</intentions>\n\n<memory>\n  {{memories}}\n</memory>\n\n<returned>\n  {{returned}}\n</returned>\n\n<last>\n  {{previous}}\n</last>`,
+    };
+    const world = renderWorld({
+      now: new Date(), previousAt: null, body: { affordances: () => [] },
+      log, setup, incoming: [],
+      results: [{ call: 'think("current")', value: "status: success\ncharacters: 7" }],
+      previous: { id: previous.id, content: previous.content }, files: [],
+    });
+
+    assert.match(world, /<intentions>\n  <intention>\n    <goal>continue the conversation<\/goal>\n  <\/intention>\n<\/intentions>/);
+    assert.match(world, /<memory>\n  thought: older/);
+    assert.doesNotMatch(world, /<memory>[\s\S]*thought: current/);
+    assert.match(world, /<last>\n  think\("current"\)\n<\/last>/);
+    assert.match(world, /<returned call="think\(&quot;current&quot;\)">/);
+  });
+});
+
+test("identity is empty until self-authored, revisions are versioned, and intentions carry progress evidence", async () => {
+  await withLog((log) => {
+    assert.equal(log.currentIdentity(), null);
+    log.identify("I am the first version.");
+    const first = log.currentIdentity();
+    log.identify("I am a <curious> maker.");
+    const current = log.currentIdentity();
+    assert.equal(current.content, "I am a <curious> maker.");
+    assert.equal(current.meta.previous, first.id);
+    const identityUnits = log.units().filter((row) => row.kind === "memory" && row.meta?.mental === "identity");
+    assert.equal(identityUnits.length, 2);
+    assert.equal(identityUnits[0].state, "revised");
+    assert.equal(identityUnits[1].state, "active");
+
+    log.intend("map the room", "every visible file has been described");
+    log.append("world", "the intention was visible");
+    assert.deepEqual(log.progress(
+      "map the room",
+      "the directory listing returned two files",
+      "open each file",
+    ), {
+      intention: "map the room",
+      evidence: "the directory listing returned two files",
+      next: "open each file",
+    });
+
+    const setup = {
+      ...DEFAULT_SETUP,
+      format: "faculties",
+      template: `<identity>\n  {{identity}}\n</identity>\n\n<intentions>\n  {{intentions}}\n</intentions>\n\n<memory>\n  {{memories}}\n</memory>\n\n<latent>\n  {{latent}}\n</latent>`,
+    };
+    const activeWorld = renderWorld({
+      now: new Date(), previousAt: null, body: { affordances: () => [] },
+      log, setup, incoming: [], results: [], previous: null, files: [],
+    });
+    assert.match(activeWorld, /<identity>\n  I am a &lt;curious&gt; maker\./);
+    assert.match(activeWorld, /<goal>map the room<\/goal>/);
+    assert.match(activeWorld, /<success>every visible file has been described<\/success>/);
+    assert.match(activeWorld, /<evidence>the directory listing returned two files<\/evidence>/);
+    assert.match(activeWorld, /<next>open each file<\/next>/);
+
+    assert.deepEqual(log.resolve(
+      "map the room",
+      "done",
+      "both files were opened and described",
+    ), {
+      intention: "map the room",
+      outcome: "done",
+      evidence: "both files were opened and described",
+    });
+    assert.equal(log.activeIntentions().length, 0);
+    const resolvedWorld = renderWorld({
+      now: new Date(), previousAt: null, body: { affordances: () => [] },
+      log, setup, incoming: [], results: [], previous: null, files: [],
+    });
+    assert.doesNotMatch(resolvedWorld, /resolved intention: map the room/);
+    assert.match(resolvedWorld, /<available kind="intention" count="1"\/>/);
+    const recalled = new Body({ log, workspace: "" }).recall("map the room");
+    assert.equal(recalled.status, "success");
+    assert.match(recalled.units[0].content, /outcome: done/);
+    assert.match(recalled.units[0].content, /evidence: both files were opened and described/);
+  });
+});
+
+test("typed memory units support create, read, revise, and forget without erasing history", async () => {
+  await withLog((log) => {
+    assert.deepEqual(log.remember("belief", "Zero and One share trace.txt"), {
+      kind: "belief",
+      memory: "Zero and One share trace.txt",
+    });
+    const first = log.units().find((row) => row.meta?.mental === "belief");
+    assert.ok(first);
+    assert.equal(first.kind, "memory");
+    assert.equal(first.state, "active");
+
+    log.append("world", "the belief was visible");
+    assert.equal(log.revisableMemories("share trace.txt").length, 1);
+    assert.deepEqual(log.revise(first.id, "Zero and One have separate private trace.txt files"), {
+      kind: "belief",
+      before: "Zero and One share trace.txt",
+      memory: "Zero and One have separate private trace.txt files",
+    });
+
+    const beliefs = log.units().filter((row) => row.meta?.mental === "belief");
+    assert.equal(beliefs.length, 2);
+    assert.equal(beliefs[0].state, "revised");
+    assert.equal(beliefs[1].state, "active");
+    assert.equal(beliefs[1].meta.previous, beliefs[0].id);
+    assert.equal(log.search("share trace.txt").at(0).state, "revised");
+
+    const world = renderWorld({
+      now: new Date(), previousAt: null, body: { affordances: () => [] },
+      log, setup: DEFAULT_SETUP, incoming: [], results: [], previous: null, files: [],
+    });
+    assert.match(world, /belief: Zero and One have separate private trace\.txt files/);
+    assert.doesNotMatch(world, /belief: Zero and One share trace\.txt/);
+
+    assert.deepEqual(log.forget([beliefs[1].id]), [beliefs[1].id]);
+    assert.equal(log.search("separate private trace.txt").length, 0);
+    const archived = log.byId(beliefs[1].id);
+    assert.equal(archived.content, "Zero and One have separate private trace.txt files");
+    assert.equal(log.unit(beliefs[1].id).state, "forgotten");
+  });
+});
+
+test("identity and revised intentions are typed memory units with continuing evidence", async () => {
+  await withLog((log) => {
+    log.remember("identity", "I am learning this room.");
+    assert.equal(log.currentIdentity().kind, "memory");
+    assert.equal(log.currentIdentity().meta.mental, "identity");
+
+    log.intend("map the room", "every file is described");
+    log.append("world", "the intention was visible");
+    log.progress("map the room", "two files were listed", "open both files");
+    const original = log.activeIntentions()[0];
+    assert.ok(original);
+    log.revise(original.id, "map and describe the room");
+
+    const current = log.activeIntentions()[0];
+    assert.equal(current.content, "map and describe the room");
+    assert.equal(current.meta.success, "every file is described");
+    assert.deepEqual(current.meta.evidence, ["two files were listed"]);
+    assert.equal(current.meta.next, "open both files");
+    assert.equal(log.unit(original.id).state, "revised");
+
+    const identity = log.currentIdentity();
+    assert.deepEqual(log.forget([identity.id]), [identity.id]);
+    assert.equal(log.currentIdentity(), null);
+  });
+});
+
+test("historical identity events enter the common memory projection without rewriting history", async () => {
+  await withLog((log) => {
+    const legacy = log.append("identity", "I came from the earlier identity format.", { previous: null });
+    const projected = log.currentIdentity();
+    assert.equal(projected.id, legacy.id);
+    assert.equal(projected.kind, "memory");
+    assert.equal(projected.meta.mental, "identity");
+    assert.equal(projected.meta.legacyKind, "identity");
+
+    log.identify("I now persist as a typed memory unit.");
+    assert.equal(log.currentIdentity().content, "I now persist as a typed memory unit.");
+    assert.equal(log.unit(legacy.id).state, "revised");
+    assert.equal(log.byId(legacy.id).kind, "identity");
+  });
+});
+
+test("consolidation folds episodic scratch without swallowing authored mind states", async () => {
+  await withLog((log, directory) => {
+    const body = new Body({ log, workspace: directory });
+    const scratch = log.append("incoming", "temporary observations to distill", { from: "someone" });
+    log.remember("belief", "The two workspaces are separate.");
+    log.remember("value", "Preserving exact evidence matters.");
+    log.identify("I am investigating the environment.");
+    log.intend("finish the investigation", "the evidence answers the question");
+    log.append("world", "all durable states were visible");
+
+    const folded = body.consolidate("The temporary observation was examined.");
+    assert.equal(folded.status, "success");
+    assert.equal(log.unit(scratch.id).state, "shelved");
+    assert.equal(log.currentIdentity().content, "I am investigating the environment.");
+    assert.equal(log.activeIntentions()[0].content, "finish the investigation");
+    assert.deepEqual(
+      log.activeMemories().filter((row) => ["belief", "value"].includes(row.meta?.mental)).map((row) => row.state),
+      ["active", "active"],
+    );
   });
 });
 
@@ -293,8 +635,8 @@ test("a call that was written but not read comes back as an honest result", asyn
     });
     // She sees the exact text and that it did not become an act — an objective
     // result, not a silence, and no instruction was added to tell her so.
-    assert.match(world, /RETURNED/);
+    assert.match(world, /<returned>/);
     assert.match(world, /written like an act but did not become one/);
-    assert.match(world, /speak\("beyond just watching\."\)search/);
+    assert.match(world, /<returned call="speak\(&quot;beyond just watching\.&quot;\)search/);
   });
 });

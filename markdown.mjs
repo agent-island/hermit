@@ -31,12 +31,13 @@ export function buildMarkdown(log) {
     ].join(" · "),
   );
 
-  const spoke = events.filter((e) => e.kind === "action" && e.meta?.name === "speak").length;
+  const thought = events.filter((e) => e.kind === "action" && ["speak", "think"].includes(e.meta?.name)).length;
+  const spoke = events.filter((e) => e.kind === "action" && e.meta?.name === "speak_aloud").length;
   const said = events.filter((e) => e.kind === "incoming").length;
   const made = events.filter((e) => e.kind === "action" && e.meta?.name === "write").length;
   out.push("");
   out.push(
-    `She spoke aloud **${spoke}** time${spoke === 1 ? "" : "s"}, was spoken to **${said}**, ` +
+    `She recorded **${thought}** inner thought${thought === 1 ? "" : "s"}, spoke aloud **${spoke}** time${spoke === 1 ? "" : "s"}, was spoken to **${said}**, ` +
       `and made **${made}** thing${made === 1 ? "" : "s"}.`,
   );
 
@@ -84,6 +85,16 @@ export function buildMarkdown(log) {
       out.push("");
       out.push("```");
       out.push(reasoning);
+      out.push("```");
+      out.push("</details>");
+    }
+
+    for (const details of moment.reasoningDetails) {
+      out.push("");
+      out.push("<details><summary>complete structured reasoning details</summary>");
+      out.push("");
+      out.push("```json");
+      out.push(details);
       out.push("```");
       out.push("</details>");
     }
@@ -139,16 +150,17 @@ function groupMoments(events) {
   let pending = null;
   for (const event of events) {
     if (event.kind === "world") {
-      current = { at: event.at, room: event.content, incoming: [], calls: [], memories: [], shelves: [], reasoning: [], emission: null };
+      current = { at: event.at, room: event.content, incoming: [], calls: [], memories: [], shelves: [], reasoning: [], reasoningDetails: [], emission: null };
       moments.push(current);
       continue;
     }
     if (!current) {
-      current = { at: event.at, room: null, incoming: [], calls: [], memories: [], shelves: [], reasoning: [], emission: null };
+      current = { at: event.at, room: null, incoming: [], calls: [], memories: [], shelves: [], reasoning: [], reasoningDetails: [], emission: null };
       moments.push(current);
     }
     if (event.kind === "incoming") current.incoming.push(event);
     if (event.kind === "reasoning") current.reasoning.push(event.content);
+    if (event.kind === "reasoning_details") current.reasoningDetails.push(event.content);
     if (event.kind === "emission") current.emission = event.content;
     if (event.kind === "memory") current.memories.push(event);
     if (event.kind === "shelf") current.shelves.push(event);

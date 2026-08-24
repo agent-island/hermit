@@ -9,54 +9,87 @@
 // Nothing here is put into her mouth. These are the room and the honest
 // outcomes of her acts, never words she is made to say.
 
-// The room she wakes into every moment. {{...}} are current facts, filled by
-// world.mjs. Section headers in CAPS; an empty section is dropped automatically.
-// Kept deliberately neutral — nothing here frames her as here-to-do-tasks.
-export const ROOM = `TIME
-  {{time}}
-  {{elapsed}}
+// The complete model-facing scaffold. It is a factual state description, not a
+// persona or a set of orders. Its order implements a small temporal structure:
+// stable faculties and latent continuity first; the present situation next;
+// the immediately retained result and prior words last. A continuation therefore
+// begins beside what just happened, while identity remains empty until authored.
+//
+// XML tags are boundaries only. They prevent a command result, a memory and an
+// intention from becoming an ambiguous wall of prose; they do not assign a role
+// or tell the model what kind of person to become.
+export const ROOM = `<state>
+<continuity>
+  <identity>
+    {{identity}}
+  </identity>
 
-FILES
-  {{files}}
+  <intentions>
+    {{intentions}}
+  </intentions>
 
-RUNTIME
-  {{runtime}}
+  <foreground_memory>
+    {{memories}}
+  </foreground_memory>
 
-ACTIONS
-  a line of the form name(arguments) is an act; its arguments are JSON.
+  <latent_memory>
+    {{latent}}
+  </latent_memory>
+</continuity>
+
+<faculties>
+  a line name(arguments) is an act; its arguments are JSON.
+  more than one act can occur in the same continuation.
   {{forms}}
-  a moment ends when the text ends. the next moment starts after {{gap}}.
+</faculties>
 
-CONTEXT
-  {{context}}
+<present>
+  <time>{{time}}</time>
+  <elapsed>{{elapsed}}</elapsed>
 
-INCOMING
-  {{incoming}}
+  <around>
+    <files>
+      {{files}}
+    </files>
+    {{runtime}}
+  </around>
 
-RETURNED
-  {{returned}}
+  <heard>
+    {{incoming}}
+  </heard>
 
-MEMORY
-  {{memories}}
+  <returned>
+    {{returned}}
+  </returned>
 
-PREVIOUS
-  {{previous}}`;
+  <last>
+    {{previous}}
+  </last>
+</present>
+</state>`;
 
 export const VOICE = {
   // The ACTIONS list she reads every moment: each form, and what it does.
   // Which appear, and in what order, is decided in body.affordances().
   actions: {
-    speak:       { form: "speak(text)",                does: "speak" },
-    feel:        { form: "feel(emotion, intensity)",   does: "a feeling, its intensity a number from 0 to 1" },
+    think:       { form: "think(text)",                does: "think" },
+    identify:    { form: "identify(text)",             does: "identity" },
+    speak_aloud: { form: "speak_aloud(text)",          does: "speak aloud" },
+    feel:        { form: "feel(emotion, intensity)",   does: "a feeling attached to the words of this moment, its intensity a number from 0 to 1" },
     search:      { form: "search(query)",              does: "searches the internet, returns results and page text" },
     open:        { form: "open(url)",                  does: "downloads one web page, returns a source number and its first page" },
     read_source: { form: "read_source(number, page)",  does: "returns one page of a fetched source; page 0 is the first, and each next page is one higher" },
     run:         { form: "run(command)",               does: "runs a command on the machine, returns its output" },
+    remember:    { form: "remember(kind, text, cue)",  does: "a memory of the named kind; an optional cue can bring it into foreground" },
     recall:      { form: "recall(phrase)",             does: "returns memory units whose content matches the phrase, including shelved ones" },
-    shelve:      { form: "shelve(phrase)",             does: "lets every memory whose text contains the phrase recede from following context; the phrase becomes their name in the SHELVED list, and recall returns them by it" },
-    consolidate: { form: "consolidate(text)",          does: "folds the memories and completed acts in active attention into one lasting memory in the words given; the originals recede, still recallable" },
+    revise:      { form: "revise(memory, text)",       does: "revision of a matching memory" },
+    shelve:      { form: "shelve(phrase)",             does: "lets every active memory matching the phrase recede from following context; the phrase becomes their name in the SHELVED list, and recall returns them by it" },
+    consolidate: { form: "consolidate(text)",          does: "folds active experiences and completed acts not already held in a lasting memory into one lasting memory in the words given; the folded originals recede, still recallable" },
+    intend:      { form: "intend(goal, success, cue)", does: "a standing intention with a success condition and an optional retrieval cue" },
+    progress:    { form: "progress(intention, evidence, next, cue)", does: "evidence and the current next step of a standing intention" },
+    resolve:     { form: "resolve(intention, outcome, evidence)", does: "resolution" },
     draw:        { form: "draw(n)",                    does: "moves n moments from the reserve into this life" },
-    sleep:       { form: "sleep()",                    does: "sets the next moment for 120 seconds later" },
+    sleep:       { form: "sleep()",                    does: "sets an explicit return after the configured rest" },
     ls:          { form: "ls()",                       does: "lists the files that are here" },
     read:        { form: "read(path)",                 does: "returns the contents of one file" },
     write:       { form: "write(path, text)",          does: "creates a file, or overwrites one with the same name" },
@@ -70,8 +103,20 @@ export const VOICE = {
   // ("say it more precisely"), which address her and rank her below a speaker.
   // Each says what is, and stops there. A few take a value; those are functions.
   messages: {
-    speakNeedsText:     "there was no text to speak",
+    thinkNeedsText:     "there was no text to think",
+    identityNeedsText:  "there was no identity text",
+    rememberNeedsKind:  "no kind was named for the memory",
+    rememberNeedsText:  "there was no text for the memory",
+    reviseNeedsMemory:  "no words named a memory to revise",
+    reviseNeedsText:    "there was no revised memory text",
+    reviseNoMatch:      (phrase) => `no durable memory matches "${phrase}"`,
+    reviseAmbiguous:    (phrase, options) => `"${phrase}" matches several durable memories:\n${options}`,
+    speakAloudNeedsText:"there was no text to speak aloud",
     feelNeedsEmotion:   "no feeling was named",
+    intendNeedsText:    "no goal was named to intend",
+    progressNeedsRef:   "no intention was named for progress",
+    progressNeedsEvidence: "no progress evidence was recorded",
+    resolveNeedsRef:    "no intention was named to resolve",
     letterNeedsAddress: "the letter had no address",
     letterNeedsText:    "the letter had no text",
     noQuery:            "no query was given",

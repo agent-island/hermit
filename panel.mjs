@@ -1,11 +1,12 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { buildLife } from "./export.mjs";
+import { archiveLife } from "./archive.mjs";
 import { loadSetup, saveSetup, DEFAULT_SETUP, PLACEHOLDERS } from "./setup.mjs";
 import { rewind, points } from "./rewind.mjs";
 import { buildMarkdown } from "./markdown.mjs";
 import { nowPage, momentCards } from "./plain.mjs";
-import { rm, mkdir, writeFile, copyFile } from "node:fs/promises";
+import { rm, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderPage } from "./panel-ui.mjs";
@@ -19,26 +20,6 @@ const PRESENCE_TIMEOUT_MS = 20_000;
 const EXTENSION_BUILD = "0.2.0";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-
-// Snapshot the whole life to ami/archive/ before anything erases it. Rewind and
-// rebirth both delete; this makes sure a copy always survives first, as a
-// self-contained html and the authoritative sqlite. Best-effort: a failed
-// archive must never block the operator's action, but it should be rare.
-async function archiveLife(log, workspace, reason) {
-  try {
-    const count = log.since(0, 1_000_000).length;
-    if (!count) return null;
-    const dir = path.join(HERE, "archive");
-    await mkdir(dir, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const base = path.join(dir, `${stamp}--${reason}--${count}events`);
-    await writeFile(`${base}.html`, buildLife(log));
-    await copyFile(path.join(path.dirname(workspace), "ami.sqlite"), `${base}.sqlite`).catch(() => {});
-    return base;
-  } catch {
-    return null;
-  }
-}
 
 export class Observer {
   constructor() {
@@ -90,7 +71,13 @@ export function startPanel({
   workspace,
   config = null,
   audible = null,
+  preserveLife = null,
 }) {
+  const preserve = preserveLife || ((reason) => archiveLife(log, {
+    archiveDir: process.env.AMI_ARCHIVE_DIR || path.join(HERE, "archive"),
+    reason,
+    label: process.env.AMI_ARCHIVE_LABEL || "life",
+  }));
   // When she lives in a machine (AMI_SHELL_SSH set) her files are there, not in
   // the empty local workspace. Count her home on the machine, refreshed in the
   // background so rendering stays synchronous and no request ever waits on ssh.
@@ -353,11 +340,9 @@ export function startPanel({
     // stays. Restart alone just stops and starts the loop.
     if (url.pathname === "/reset" && request.method === "POST") {
       const nextRevision = Number(log.get("observer_revision", 0)) + 1;
-      loop.stop();
-      for (let i = 0; i < 60 && loop.busy; i += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      await archiveLife(log, workspace, "rebirth");
+      loop.quiesce();
+      await loop.waitUntilIdle();
+      await preserve("rebirth");
       log.wipe({ keep: ["setup_v2"] });
       log.set("observer_revision", nextRevision);
       await rm(workspace, { recursive: true, force: true });
@@ -377,13 +362,11 @@ export function startPanel({
 
     if (url.pathname === "/rewind" && request.method === "POST") {
       const { toId } = JSON.parse((await read(request)) || "{}");
-      loop.stop();
+      loop.quiesce();
       // Let a moment already in flight land before the ground moves. Without
       // this, a rewind mid-moment left her stopped with no error anywhere.
-      for (let i = 0; i < 60 && loop.busy; i += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      await archiveLife(log, workspace, "rewind");
+      await loop.waitUntilIdle();
+      await preserve("rewind");
       const summary = await rewind(log, workspace, toId);
       log.set(
         "observer_revision",
@@ -419,8 +402,11 @@ export function startPanel({
     // End this life deliberately. She stays readable; she simply has no next
     // moment. Download /life.html to keep a copy.
     if (url.pathname === "/end" && request.method === "POST") {
+      loop.quiesce();
+      await loop.waitUntilIdle();
       log.append("end", "ended by the observer", { by: "observer" });
       loop.stop();
+      await preserve("ended-by-observer");
       json(response, { ended: true });
       return;
     }
@@ -441,6 +427,40 @@ export function startPanel({
       return;
     }
 
+    if (url.pathname === "/peer-say" && request.method === "POST") {
+      const expected = String(process.env.AMI_PEER_TOKEN || "");
+      const supplied = String(request.headers["x-ami-peer-token"] || "");
+      if (!expected || supplied !== expected) {
+        response.writeHead(403, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: false }));
+        return;
+      }
+      let message;
+      try {
+        message = JSON.parse((await read(request)) || "{}");
+      } catch {
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: false }));
+        return;
+      }
+      const text = String(message.text || "").trim();
+      const from = String(message.from || "other").trim() || "other";
+      if (!text) {
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: false }));
+        return;
+      }
+      if (!loop.running) {
+        response.writeHead(409, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: false }));
+        return;
+      }
+      log.append("incoming", text, { from });
+      loop.interrupt();
+      json(response, { ok: true, receivedBy: String(process.env.AMI_SELF_NAME || "the other living agent") });
+      return;
+    }
+
     if (url.pathname === "/say" && request.method === "POST") {
       const text = (await read(request)).trim();
       if (text) {
@@ -454,7 +474,10 @@ export function startPanel({
     response.writeHead(404).end("not found");
   });
 
-  server.listen(port, "127.0.0.1");
+  // Localhost by default. Set AMI_HOST=0.0.0.0 to expose the panel on the LAN
+  // (reachable at this machine's router IP) — note this also exposes control,
+  // not just viewing, to anyone on the network.
+  server.listen(port, process.env.AMI_HOST || "127.0.0.1");
   return server;
 }
 

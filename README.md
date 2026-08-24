@@ -42,7 +42,9 @@ Network use is limited but not absent. Prompts go to the configured model provid
 | `mail.mjs` | Local-only letter store used by the fake email action |
 | `export.mjs`, `markdown.mjs`, `plain.mjs` | Life exports and readable projections |
 
-By default, each full moment is independent at the API level and continuity is reconstructed from the projected record. Conversation context, emotional marking, and the lightweight heartbeat are experimental settings. The heartbeat is disabled by default because its first-person continuation phrase is itself a causal intervention; a run that enables it must report that fact.
+By default, each continuation is independent at the API level and continuity is reconstructed from the projected record. The default scaffold is tagged, identity remains empty until self-authored, and feelings and intentions exist only when the model records them. [Continuity scaffold](CONTINUITY.md) explains the research basis, state transitions, and limits.
+
+Continuation is event-driven. A real act schedules the next continuation, `sleep()` schedules an explicit return, and incoming speech wakes an idle life. When a response makes no act and schedules no return, the life remains available but no timer asks it to manufacture another thought. The former model-generated heartbeat remains readable for historical exports but is no longer used by the runtime.
 
 ## Testing and reproducibility
 

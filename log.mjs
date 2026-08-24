@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { actionFact, isMemoryTransition } from "./memory-state.mjs";
+import { actionFact, isMemoryTransition, withFeeling } from "./memory-state.mjs";
 
 const ACTIVITY_GROUPS = `
   WITH marked AS (
@@ -29,6 +29,9 @@ const ACTIVITY_GROUPS = `
 //
 // kinds:
 //   world     the exact document rendered for a moment
+//   api       the untouched request and provider response
+//   reasoning the readable reasoning text returned by the provider
+//   reasoning_details the complete structured reasoning blocks, unflattened
 //   emission  her raw output, verbatim, before anything is parsed out of it
 //   action    one parsed call
 //   result    what that call actually returned, including failures
@@ -175,15 +178,28 @@ export class Log {
     const rows = this.since(0, 1_000_000);
     const shelved = this.shelvedIds();
     const forgotten = this.forgottenIds();
+    const revised = this.revisedIds();
     // Forgotten is the stronger recession: gone from context and from recall.
     // Shelved recedes from context but stays reachable. A unit can be neither.
-    const stateOf = (id) => forgotten.has(id) ? "forgotten" : (shelved.has(id) ? "shelved" : "active");
+    const stateOf = (id) => forgotten.has(id)
+      ? "forgotten"
+      : (revised.has(id) ? "revised" : (shelved.has(id) ? "shelved" : "active"));
     const units = [];
     const actions = new Map();
+    const memories = new Map();
+    const representedEmissions = new Set();
     let pending = null;
     for (const row of rows) {
-      if (["incoming", "emission", "memory"].includes(row.kind)) {
-        units.push({ ...row, state: stateOf(row.id) });
+      if (["incoming", "emission", "memory", "identity"].includes(row.kind)) {
+        const unit = row.kind === "identity"
+          ? { ...row, kind: "memory", meta: { ...row.meta, mental: "identity", authored: true, legacyKind: "identity" }, state: stateOf(row.id) }
+          : { ...row, state: stateOf(row.id) };
+        units.push(unit);
+        if (unit.kind === "memory") {
+          memories.set(row.id, unit);
+          const felt = Number(row.meta?.felt);
+          if (Number.isInteger(felt) && felt > 0) representedEmissions.add(felt);
+        }
         continue;
       }
       if (row.kind === "action") {
@@ -205,10 +221,28 @@ export class Log {
           yielded: row.meta?.yielded,
           error: row.meta?.error,
         });
+        // A second feel() in the same emission reuses its first memory. Its
+        // distinct feeling stays in the exact action/result record and is
+        // projected onto that one memory here, without copying the emission.
+        if (linked.meta?.name === "feel") {
+          const value = row.meta?.value && typeof row.meta.value === "object" ? row.meta.value : {};
+          const memory = memories.get(Number(value.memory));
+          if (memory) {
+            memory.meta = withFeeling(
+              memory.meta,
+              value.emotion ?? linked.meta?.args?.[0],
+              value.intensity ?? linked.meta?.args?.[1],
+            );
+          }
+        }
       }
       if (linked === pending) pending = null;
     }
-    return units;
+    // A felt memory is the model-facing identity of that experience. The raw
+    // emission remains byte-for-byte in the event record, but carrying both
+    // would make one experience appear twice in recall, consolidation, and
+    // conversation history.
+    return units.filter((unit) => !(unit.kind === "emission" && representedEmissions.has(unit.id)));
   }
 
   unit(id) {
@@ -236,6 +270,16 @@ export class Log {
     return ids;
   }
 
+  revisedIds() {
+    const ids = new Map();
+    for (const row of this.recent("revise", 1_000_000)) {
+      const target = Number(row.meta?.target);
+      const replacement = Number(row.meta?.replacement);
+      if (Number.isInteger(target) && target > 0) ids.set(target, replacement || null);
+    }
+    return ids;
+  }
+
   isShelved(id) {
     const target = Number(id);
     if (!Number.isInteger(target) || target < 1) return false;
@@ -247,45 +291,253 @@ export class Log {
   // What recall() reaches. Shelving changes automatic context, never reach.
   // A bare integer is an exact unit number; every other value is a text
   // search across thought, incoming words, memories, calls, and call results.
-  search(query, limit = 8) {
+  search(query, limit = Infinity) {
     const wanted = String(query || "").trim();
-    if (/^[1-9]\d*$/.test(wanted)) {
-      const exact = this.unit(Number(wanted));
-      // A forgotten unit is beyond recall too — even a bare number cannot reach
-      // back into what she chose to let go.
-      return exact && exact.state !== "forgotten" ? [exact] : [];
-    }
     const needle = wanted.toLocaleLowerCase();
-    return this.units()
+    const resolved = this.resolvedIds();
+    const matches = this.units()
+      .map((row) => this.withResolution(row, resolved))
       .filter((row) => row.state !== "forgotten")
       .filter((row) => {
         const result = row.result?.content || "";
         return `${row.content}\n${result}`.toLocaleLowerCase().includes(needle);
-      })
-      .slice(-Math.max(1, Number(limit) || 8))
-      .reverse();
+      });
+    const size = Number(limit);
+    const kept = Number.isFinite(size) && size > 0 ? matches.slice(-Math.floor(size)) : matches;
+    return kept.reverse();
   }
 
   activeMemories() {
-    return this.units().filter((row) => row.kind === "memory" && row.state === "active");
+    const standing = this.standingIntentionIds();
+    const resolved = this.resolvedIds();
+    return this.units().filter((row) =>
+      row.kind === "memory"
+      && row.state === "active"
+      && row.meta?.mental !== "identity"
+      && !standing.has(row.id))
+      .map((row) => this.withResolution(row, resolved));
   }
 
   // What follows as durable memory: completed actions as compact objective
   // facts, plus the long-term memories she authored. Thoughts and incoming
   // words remain exact episodic sources and can be consolidated, but are not
-  // silently rewritten into summaries by the runtime.
+  // silently rewritten into summaries by the runtime. An UNRESOLVED intention is
+  // excluded here — it lives in the INTENTION view instead; once resolved it
+  // falls back into ordinary memory, consolidate/shelve/recall-able like any.
   followingMemories() {
+    const standing = this.standingIntentionIds();
+    const resolved = this.resolvedIds();
     return this.units().filter((row) =>
-      row.state === "active" && (
-        row.kind === "memory" ||
+      row.state === "active" && !standing.has(row.id) && (
+        (row.kind === "memory" && row.meta?.mental !== "identity") ||
         (row.kind === "action" && row.result && !isMemoryTransition(row.meta?.name))
       ),
-    );
+    ).map((row) => this.withResolution(row, resolved));
+  }
+
+  withResolution(row, resolved = this.resolvedIds()) {
+    const resolution = row.kind === "memory" && row.meta?.intention ? resolved.get(row.id) : null;
+    return resolution ? { ...row, meta: { ...row.meta, resolution } } : row;
+  }
+
+  // --- Intention: a memory the mind stands behind until it resolves it. Stored
+  // as an ordinary memory unit tagged {intention:true}; its standing/resolved
+  // status is a marker layer over the append-only log, exactly like shelve. It
+  // is never deleted — resolving only records how it ended.
+  resolvedIds() {
+    const out = new Map(); // target id -> exact resolution
+    for (const row of this.recent("resolve", 1_000_000)) {
+      const target = Number(row.meta?.target);
+      if (Number.isInteger(target)) out.set(target, {
+        id: row.id,
+        outcome: row.meta?.outcome || "done",
+        evidence: String(row.meta?.evidence || ""),
+        at: row.at,
+      });
+    }
+    return out;
+  }
+
+  // Ids of intentions still standing in active attention: set, not resolved,
+  // and not shelved or forgotten. Shelving or forgetting an intention is a
+  // legitimate way to let a goal recede — it then leaves the INTENTION view
+  // like any receding memory (still recallable if only shelved), which is why
+  // this requires state "active", not merely "not forgotten".
+  standingIntentionIds() {
+    const resolved = this.resolvedIds();
+    const ids = new Set();
+    for (const row of this.units()) {
+      if (row.kind === "memory" && (row.meta?.intention || row.meta?.mental === "intention") && !resolved.has(row.id) && row.state === "active") {
+        ids.add(row.id);
+      }
+    }
+    return ids;
+  }
+
+  // The standing intentions, oldest first — what she is currently trying to do.
+  activeIntentions() {
+    const standing = this.standingIntentionIds();
+    const updates = new Map();
+    for (const row of this.recent("progress", 1_000_000)) {
+      const target = Number(row.meta?.target);
+      if (!Number.isInteger(target)) continue;
+      const list = updates.get(target) || [];
+      list.push(row);
+      updates.set(target, list);
+    }
+    return this.units().filter((row) => standing.has(row.id)).map((row) => {
+      const progress = updates.get(row.id) || [];
+      const latest = progress.at(-1);
+      const carried = Array.isArray(row.meta?.evidence) ? row.meta.evidence.filter(Boolean) : [];
+      return {
+        ...row,
+        meta: {
+          ...row.meta,
+          evidence: [...carried, ...progress.map((one) => String(one.content || "")).filter(Boolean)],
+          next: String(latest?.meta?.next || row.meta?.next || ""),
+          cue: String(latest?.meta?.cue || row.meta?.cue || ""),
+        },
+      };
+    });
+  }
+
+  intend(text, success = "", cue = "") {
+    const goal = String(text || "").trim();
+    if (!goal) return { note: "intend needs the goal as text" };
+    const doneWhen = String(success || "").trim();
+    const when = String(cue || "").trim();
+    this.append("memory", goal, {
+      mental: "intention", intention: true, authored: true,
+      success: doneWhen, cue: when,
+    });
+    return {
+      intention: goal,
+      ...(doneWhen ? { success: doneWhen } : {}),
+      ...(when ? { cue: when } : {}),
+    };
+  }
+
+  currentIdentity() {
+    return this.units().filter((row) =>
+      row.kind === "memory" && row.meta?.mental === "identity" && row.state === "active").at(-1) || null;
+  }
+
+  identify(text) {
+    const identity = String(text || "").trim();
+    if (!identity) return { note: "identify needs identity text" };
+    const previous = this.currentIdentity();
+    const memory = this.append("memory", identity, {
+      mental: "identity", authored: true, previous: previous?.id || null,
+    });
+    if (previous) this.append("revise", previous.content, { target: previous.id, replacement: memory.id });
+    return { identity };
+  }
+
+  remember(kind, text, cue = "") {
+    const mental = String(kind || "").trim().toLocaleLowerCase().replace(/\s+/g, " ").slice(0, 40);
+    const content = String(text || "").trim();
+    if (!mental) return { note: "remember needs a kind" };
+    if (!content) return { note: "remember needs text" };
+    if (mental === "identity") return this.identify(content);
+    const when = String(cue || "").trim();
+    if (mental === "intention") return this.intend(content, "", when);
+    this.append("memory", content, { mental, authored: true, cue: when });
+    return { kind: mental, memory: content, ...(when ? { cue: when } : {}) };
+  }
+
+  revisableMemories(query) {
+    const needle = String(query || "").trim().toLocaleLowerCase();
+    if (!needle) return [];
+    const world = this.last("world");
+    return this.units().filter((row) =>
+      row.kind === "memory"
+      && row.state === "active"
+      && !(world && row.id > world.id)
+      && String(row.content).toLocaleLowerCase().includes(needle));
+  }
+
+  revise(id, text) {
+    const target = this.unit(id);
+    const content = String(text || "").trim();
+    if (!target || target.kind !== "memory" || target.state !== "active") return { note: "that memory is not active" };
+    if (!content) return { note: "revise needs the new memory as text" };
+    const enriched = target.meta?.intention
+      ? this.activeIntentions().find((row) => row.id === target.id) || target
+      : target;
+    const meta = {
+      ...enriched.meta,
+      authored: true,
+      previous: target.id,
+    };
+    delete meta.resolution;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const replacement = this.append("memory", content, meta);
+      this.append("revise", target.content, { target: target.id, replacement: replacement.id });
+      this.db.exec("COMMIT");
+      return { kind: meta.mental || "memory", before: target.content, memory: content };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  visibleIntention(query) {
+    const raw = String(query ?? "").trim();
+    if (!raw) return { note: "no intention was named" };
+    const world = this.last("world");
+    const standing = this.activeIntentions()
+      .filter((row) => !(world && row.id > world.id));
+    if (!standing.length) return { note: "there are no standing intentions" };
+    const needle = raw.toLocaleLowerCase();
+    const target = standing.find((row) => String(row.content).toLocaleLowerCase().includes(needle));
+    return target || { note: `no standing intention matches ${JSON.stringify(raw)}` };
+  }
+
+  progress(query, evidence, next = "", cue = "") {
+    const target = this.visibleIntention(query);
+    if (target?.note) return target;
+    const observed = String(evidence || "").trim();
+    if (!observed) return { note: "progress needs evidence" };
+    const following = String(next || "").trim();
+    const when = String(cue || "").trim();
+    this.append("progress", observed, { target: target.id, next: following, cue: when });
+    return {
+      intention: target.content,
+      evidence: observed,
+      ...(following ? { next: following } : {}),
+      ...(when ? { cue: when } : {}),
+    };
+  }
+
+  // Resolve by a phrase in the intention's text. Unit numbers stay underground
+  // like every other memory key; a numeric phrase is still ordinary content.
+  // Marks the intention done (default) or dropped; the memory unit remains.
+  resolve(query, outcome = "done", evidence = "") {
+    const target = this.visibleIntention(query);
+    if (target?.note) return target;
+    const mark = /^(drop|dropp?ed|abandon|cancel)/i.test(String(outcome)) ? "dropped" : "done";
+    const observed = String(evidence || "").trim();
+    this.append("resolve", target.content, { target: target.id, outcome: mark, evidence: observed });
+    return {
+      intention: target.content,
+      outcome: mark,
+      ...(observed ? { evidence: observed } : {}),
+    };
   }
 
   lastCarriedEmission() {
     const row = this.last("emission");
-    return row && !this.isShelved(row.id) ? row : null;
+    if (!row) return null;
+    const units = this.units();
+    const felt = units.filter((unit) =>
+      unit.kind === "memory" && Number(unit.meta?.felt) === row.id);
+    // Once feel() gives an emission one memory identity, that identity owns
+    // whether the experience remains present. Shelving or forgetting it must
+    // not let the raw emission resurrect through PREVIOUS.
+    if (felt.length) return felt.some((unit) => unit.state === "active") ? row : null;
+    const raw = units.find((unit) => unit.id === row.id);
+    return raw?.state === "active" ? row : null;
   }
 
   // The calls of the most recent completed moment. A shelved action takes its
@@ -387,7 +639,7 @@ export class Log {
     const skipped = [];
     for (const id of asked) {
       const unit = index.get(id);
-      if (!unit || (world && unit.id > world.id)) skipped.push(id);
+      if (!unit || unit.state === "forgotten" || (world && unit.id > world.id)) skipped.push(id);
       else units.push(unit);
     }
     if (!units.length) {
@@ -397,7 +649,7 @@ export class Log {
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const memory = this.append("memory", content, { sources });
+      const memory = this.append("memory", content, { mental: "memory", authored: true, sources });
       const shelved = [];
       for (const unit of units) {
         if (unit.state === "shelved") continue;
@@ -436,8 +688,19 @@ export class Log {
     // struck. Capped so one long moment cannot dominate, never silently — the
     // record keeps the whole emission regardless.
     const kept = words;
-    const memory = this.append("memory", kept || feeling, {
-      emotion: feeling, intensity: level, felt: said?.id ?? null,
+    // The emission is the remembered experience. More than one feeling can
+    // attach to it, but the words enter memory only once. Every feel() call is
+    // still preserved independently as an action/result in the exact record.
+    const existing = said
+      ? this.db.prepare(`
+          SELECT id FROM events
+          WHERE kind = 'memory'
+            AND CAST(json_extract(meta, '$.felt') AS INTEGER) = ?
+          ORDER BY id ASC LIMIT 1
+        `).get(said.id)
+      : null;
+    const memory = existing || this.append("memory", kept || feeling, {
+      mental: "episode", emotion: feeling, intensity: level, felt: said?.id ?? null,
     });
     return { emotion: feeling, intensity: level, memory: memory.id, felt: said?.id ?? null };
   }
@@ -504,17 +767,18 @@ export class Log {
   //
   // So: answered is recorded explicitly, per context, and only for messages
   // that were actually in front of her when she replied.
-  unanswered(limit = 30) {
+  unanswered(limit = Infinity) {
     const answered = this.get("answered_v1", {}) || {};
     const shelved = this.shelvedIds();
-    return this.db
-      .prepare("SELECT * FROM events WHERE kind = 'incoming' ORDER BY id DESC LIMIT 200")
+    const forgotten = this.forgottenIds();
+    const rows = this.db
+      .prepare("SELECT * FROM events WHERE kind = 'incoming' ORDER BY id ASC")
       .all()
       .map(parse)
-      .filter((row) => !shelved.has(row.id))
-      .filter((row) => row.id > (answered[row.meta?.from || "someone"] ?? 0))
-      .sort((a, b) => a.id - b.id)
-      .slice(-limit);
+      .filter((row) => !shelved.has(row.id) && !forgotten.has(row.id))
+      .filter((row) => row.id > (answered[row.meta?.from || "someone"] ?? 0));
+    const size = Number(limit);
+    return Number.isFinite(size) && size > 0 ? rows.slice(-Math.floor(size)) : rows;
   }
 
   markAnswered(who, upToId) {
@@ -615,11 +879,11 @@ export class Log {
     return tally;
   }
 
-  // The last thing she said aloud, and whether anything has been said to her
-  // since. Two facts, no feeling attached.
+  // The last explicit language action, including the historical name `speak`,
+  // and whether anything has been said to her since.
   lastSpoke() {
     const row = this.db
-      .prepare("SELECT * FROM events WHERE kind = 'action' AND meta LIKE '%\"name\":\"speak\"%' ORDER BY id DESC LIMIT 1")
+      .prepare("SELECT * FROM events WHERE kind = 'action' AND (meta LIKE '%\"name\":\"speak\"%' OR meta LIKE '%\"name\":\"think\"%' OR meta LIKE '%\"name\":\"speak_aloud\"%') ORDER BY id DESC LIMIT 1")
       .get();
     if (!row) return null;
     const answered = this.db
@@ -654,8 +918,12 @@ function modelResultContent(unit) {
 
   const name = String(unit?.meta?.name || unit?.result?.meta?.name || "");
   const args = Array.isArray(unit?.meta?.args) ? unit.meta.args : [];
-  if (name === "speak") {
-    return formatModelResult({ status: "success", characters: Number(raw.characters) || String(args[0] || raw.spoken || "").trim().length });
+  if (["speak", "think", "speak_aloud"].includes(name)) {
+    return formatModelResult({
+      status: "success",
+      characters: Number(raw.characters) || String(args[0] || raw.spoken || "").trim().length,
+      ...(name === "speak_aloud" && raw.receivedBy ? { receivedBy: raw.receivedBy } : {}),
+    });
   }
   if (name === "email") {
     return formatModelResult({

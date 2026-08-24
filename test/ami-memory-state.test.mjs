@@ -79,6 +79,7 @@ test("all short transition sequences preserve state exclusivity and recall is re
     row(4, "memory", { sources: [1] }, "I read the note."),
     row(5, "shelf", { target: 4 }),
     row(6, "recall", { target: 1 }),
+    row(7, "revise", { target: 4, replacement: 8 }),
   ];
 
   const sequences = [[]];
@@ -89,7 +90,7 @@ test("all short transition sequences preserve state exclusivity and recall is re
   }
   for (const sequence of sequences) {
     const state = memoryState([action, result, ...sequence]);
-    for (const unit of state.units.values()) assert.ok(["active", "shelved"].includes(unit.state));
+    for (const unit of state.units.values()) assert.ok(["active", "shelved", "revised"].includes(unit.state));
     assert.ok(followingState(state).every((unit) => unit.state === "active"));
 
     const beforeRecall = sequence.reduce(transitionMemory, memoryState([action, result]));
@@ -122,8 +123,41 @@ test("projection includes every active unit and reports the token ledger", () =>
   assert.equal(followingState(state).length, 5);
 });
 
+test("the reference projection attaches several feelings to one memory", () => {
+  const events = [
+    row(1, "emission", {}, "one exact experience"),
+    row(2, "action", { name: "feel", args: ["wonder", 0.5] }, 'feel("wonder", 0.5)'),
+    row(3, "memory", { emotion: "wonder", intensity: 0.5, felt: 1 }, "one exact experience"),
+    row(4, "result", {
+      action: 2, yielded: true,
+      value: { status: "success", emotion: "wonder", intensity: 0.5, memory: 3, felt: 1 },
+    }),
+    row(5, "action", { name: "feel", args: ["calm", 0.8] }, 'feel("calm", 0.8)'),
+    row(6, "result", {
+      action: 5, yielded: true,
+      value: { status: "success", emotion: "calm", intensity: 0.8, memory: 3, felt: 1 },
+    }),
+  ];
+  const state = memoryState(events);
+  const memory = state.units.get(3);
+  assert.deepEqual(memory.meta.feelings, [
+    { emotion: "wonder", intensity: 0.5 },
+    { emotion: "calm", intensity: 0.8 },
+  ]);
+  assert.deepEqual(projectMemory(followingState(state)).lines, [
+    "felt wonder (0.5); then calm (0.8): one exact experience",
+  ]);
+});
+
+test("a zero-intensity feeling remains an explicit zero fact", () => {
+  assert.equal(actionFact({ name: "feel", args: ["quiet", 0] }, {
+    yielded: true,
+    value: { status: "success", emotion: "quiet", intensity: 0 },
+  }), 'felt "quiet" (0)');
+});
+
 test("memory-management transitions do not create a recursive active episode", () => {
-  for (const name of ["recall", "shelve", "consolidate"]) assert.equal(isMemoryTransition(name), true);
+  for (const name of ["remember", "recall", "revise", "shelve", "consolidate"]) assert.equal(isMemoryTransition(name), true);
   assert.equal(isMemoryTransition("email"), false);
 
   const events = [
@@ -131,4 +165,17 @@ test("memory-management transitions do not create a recursive active episode", (
     row(2, "result", { action: 1, yielded: true, value: { unit: 8, state: "shelved" } }),
   ];
   assert.deepEqual(followingState(memoryState(events)), []);
+});
+
+test("revision changes the present projection while retaining both exact memory rows", () => {
+  const events = [
+    row(1, "memory", { mental: "belief", authored: true }, "the workspaces are shared"),
+    row(2, "memory", { mental: "belief", authored: true, previous: 1 }, "the workspaces are separate"),
+    row(3, "revise", { target: 1, replacement: 2 }, "the workspaces are shared"),
+  ];
+  const state = memoryState(events);
+  assert.equal(state.units.get(1).state, "revised");
+  assert.equal(state.units.get(2).state, "active");
+  assert.deepEqual(followingState(state).map((unit) => unit.id), [2]);
+  assert.deepEqual(projectMemory(followingState(state)).lines, ["belief: the workspaces are separate"]);
 });
