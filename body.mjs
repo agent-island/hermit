@@ -114,12 +114,9 @@ export class Body {
     const a = VOICE.actions;
     const setup = loadSetup(this.log);
     const momentFree = setup.format === "faculties";
-    const pair = (one) => [one.form, one.does];
-    const feeling = setup.emotion
-      ? [[a.feel.form, momentFree
-        ? "records a named feeling with these words; its intensity is a number from 0 to 1"
-        : a.feel.does]]
-      : [];
+    const shown = (one) => momentFree ? one.tagged : one.form;
+    const pair = (one) => [shown(one), one.does];
+    const feeling = setup.emotion ? [pair(a.feel)] : [];
     // Intention is pluggable like emotion: the switch controls whether the
     // state vocabulary exists; every actual goal still has to be model-authored.
     const intending = setup.intention
@@ -129,23 +126,28 @@ export class Body {
     // her life is unbounded and there is no reserve, so offering the form would
     // be naming a reach that goes nowhere — a lie with a shape. See runtime.mjs.
     const drawing = loadRuntime(this.log) ? [pair(a.draw)] : [];
-    // sleep() rests for whatever the operator set, not a fixed number. The voice
-    // entry can only carry one wording, so the real interval is stitched in here
-    // — otherwise a reconfigured sleepSeconds would leave the room telling her a
-    // duration that sleep() does not honour.
+    // continue() grants the next moment after whatever interval the operator
+    // set, not a fixed number. The voice entry can only carry one wording, so
+    // the real interval is stitched in here — otherwise a reconfigured
+    // sleepSeconds would leave the room stating a duration it does not honour.
+    // Named continue rather than sleep: with nothing else to act on the act is
+    // to carry the work forward into another moment, not to rest.
     const sleepSeconds = Number(setup.sleepSeconds) || 10;
-    const sleepPair = ["sleep()", momentFree
-      ? `rests for ${sleepSeconds} seconds`
-      : `sets the next moment for ${sleepSeconds} seconds later`];
-    const sleeping = setup.sleepEnabled !== false ? [sleepPair] : [];
+    const continuePair = [shown(a.continue), `carry on into the next moment; ${sleepSeconds} seconds pass`];
+    const sleeping = setup.sleepEnabled !== false ? [continuePair] : [];
     return [
-      pair(a.think),
-      pair(a.identify),
+      pair(a.inner_speech),
       pair(a.speak_aloud),
       ...feeling,
       pair(a.run),
+      pair(a.write),
+      pair(a.read),
+      pair(a.ls),
       pair(a.remember),
-      pair(a.recall),
+      // The memory implementation may expose restore before its model-facing
+      // form is added. Until then, keep the already-audited recall form rather
+      // than crashing the whole panel on an undefined voice entry.
+      pair(a.restore || a.recall),
       pair(a.revise),
       pair(a.shelve),
       pair(a.consolidate),
@@ -158,14 +160,20 @@ export class Body {
   }
 
   formNames() {
-    return this.affordances().map(([form]) => form.split("(")[0]);
+    const visible = this.affordances().map(([form]) =>
+      String(form).match(/^<([a-z_]+)/i)?.[1]?.toLowerCase()
+      || String(form).split("(")[0]);
+    // A current life may still use the syntax present throughout its earlier
+    // memory. Accepting it does not advertise it or put it into a new life.
+    return [...new Set([...visible, "think"])];
   }
 
   async run(name, args) {
     try {
       let value;
       switch (name) {
-        case "think": value = await this.think(String(args[0] ?? "")); break;
+        case "inner_speech":
+        case "think": value = await this.innerSpeech(String(args[0] ?? "")); break;
         case "identify": value = this.identify(String(args[0] ?? "")); break;
         case "speak_aloud": value = await this.speakAloud(String(args[0] ?? "")); break;
         // Historical records can still be replayed, although this name is no
@@ -173,21 +181,26 @@ export class Body {
         case "speak": value = await this.speak(String(args[0] ?? "")); break;
         case "feel": value = this.feel(String(args[0] ?? ""), args[1]); break;
         case "remember": value = this.remember(String(args[0] ?? ""), String(args[1] ?? ""), String(args[2] ?? "")); break;
+        case "restore": value = this.restore(String(args[0] ?? "")); break;
         case "recall": value = this.recall(String(args[0] ?? "")); break;
         case "revise": value = this.revise(String(args[0] ?? ""), String(args[1] ?? "")); break;
         case "shelve": value = this.shelve(String(args[0] ?? "")); break;
-        case "consolidate": value = this.consolidate(String(args[0] ?? "")); break;
-        case "intend": value = this.intend(String(args[0] ?? ""), String(args[1] ?? ""), String(args[2] ?? "")); break;
+        case "consolidate": value = this.consolidate(String(args[0] ?? ""), String(args[1] ?? "")); break;
+        case "intend": value = this.intend(String(args[0] ?? ""), String(args[1] ?? ""), String(args[2] ?? ""), String(args[3] ?? ""), String(args[4] ?? "")); break;
         case "progress": value = this.progressIntent(String(args[0] ?? ""), String(args[1] ?? ""), String(args[2] ?? ""), String(args[3] ?? "")); break;
         case "resolve": value = this.resolveIntent(String(args[0] ?? ""), args[1], String(args[2] ?? "")); break;
         case "draw": value = this.draw(Number(args[0])); break;
+        case "continue":
         case "sleep": {
-          if (!this.formNames().includes("sleep")) return failed(VOICE.messages.noSuchForm(name));
+          // continue() is the presented form; sleep() stays executable so older
+          // lives replay. Both grant the next moment through the one mechanism.
+          if (!this.formNames().includes("continue")) return failed(VOICE.messages.noSuchForm(name));
           value = this.sleep();
           break;
         }
         case "run": value = await this.runShell(String(args[0] ?? "")); break;
         case "ls": value = await this.ls(); break;
+        case "read": value = await this.read(String(args[0] ?? "")); break;
         case "write": value = await this.write(String(args[0] ?? ""), String(args[1] ?? "")); break;
         case "forget": value = this.forget(String(args[0] ?? "")); break;
         case "email": value = this.email(String(args[0] ?? ""), String(args[1] ?? ""), String(args[2] ?? "")); break;
@@ -206,55 +219,81 @@ export class Body {
   // or the path to it is surfaced to her — only the command's own output, as
   // fact, the same way read() returns a file's contents and nothing about the
   // disk under it.
-  async runShell(command) {
-    const cmd = String(command ?? "");
-    const host = process.env.AMI_SHELL_SSH;
-    if (!host) return failed(VOICE.messages.noMachine);
+  // Whether run() (and therefore write/read/ls) execute on a machine over the
+  // transport rather than on the local workspace. The two-agent and screen runs
+  // set HERMIT_SHELL_SSH; a bare local life does not.
+  get onMachine() {
+    return Boolean(process.env.HERMIT_SHELL_SSH);
+  }
+
+  // One command over the SSH transport, as the same account run() uses, in the
+  // same home. The command is written to the guest's stdin, so it is never a
+  // shell argument here — callers that carry model text (write) frame it as
+  // base64 so no quote or newline can be lost. Returns the raw execution.
+  async execMachine(command) {
+    const host = process.env.HERMIT_SHELL_SSH;
+    if (!host) return { unavailable: true, out: "" };
     // 60s killed her mid-install; a package install or build routinely runs
     // longer. 300s is room to finish while still bounding a hung command; truly
     // long-lived things she backgrounds (nohup … &), which survive the call.
     // DEBIAN_FRONTEND=noninteractive stops apt blocking on a Y/n prompt it can
     // never receive — there is no terminal, so an interactive read gets EOF.
-    const timeout = Number(process.env.AMI_SHELL_TIMEOUT) || 300;
-    const remote = process.env.AMI_SHELL_EXEC || limaShellCommand({ timeoutSeconds: timeout });
+    const timeout = Number(process.env.HERMIT_SHELL_TIMEOUT) || 300;
+    const remote = process.env.HERMIT_SHELL_EXEC || limaShellCommand({ timeoutSeconds: timeout });
     // The guest timeout bounds the submitted foreground script. This second,
     // local bound protects the transport itself: a leaked remote file
     // descriptor used to keep `ssh` open forever even after timeout had killed
     // the foreground shell.
-    const configuredTransportMs = Number(process.env.AMI_SHELL_TRANSPORT_TIMEOUT_MS);
+    const configuredTransportMs = Number(process.env.HERMIT_SHELL_TRANSPORT_TIMEOUT_MS);
     const transportMs = Number.isFinite(configuredTransportMs) && configuredTransportMs > 0
       ? configuredTransportMs
       : (timeout + 15) * 1000;
-    const execution = await new Promise((resolve) => {
+    return await new Promise((resolve) => {
       const p = this.spawnProcess("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, remote],
         { stdio: ["pipe", "pipe", "pipe"] });
       let buf = "";
       let settled = false;
-      const finish = (timedOut = false) => {
+      const finish = ({ timedOut = false, code = null, signal = null, error = null } = {}) => {
         if (settled) return;
         settled = true;
         clearTimeout(guard);
-        resolve({ out: buf, timedOut });
+        resolve({ out: buf, timedOut, code, signal, error });
       };
       p.stdout.on("data", (d) => (buf += d));
       p.stderr.on("data", (d) => (buf += d));
-      p.on("close", () => finish(false));
+      p.on("close", (code, signal) => finish({ code, signal }));
       p.on("error", (e) => {
         buf += String(e.message);
-        finish(false);
+        finish({ error: String(e.message) });
       });
       const guard = setTimeout(() => {
         p.kill("SIGTERM");
-        finish(true);
+        finish({ timedOut: true });
       }, transportMs);
-      p.stdin.write(cmd);
+      p.stdin.write(command);
       p.stdin.end();
     });
+  }
+
+  async runShell(command) {
+    const cmd = String(command ?? "");
+    if (!this.onMachine) return failed(VOICE.messages.noMachine);
+    const transportMs = ((Number(process.env.HERMIT_SHELL_TIMEOUT) || 300) + 15) * 1000;
+    const execution = await this.execMachine(cmd);
     const out = execution.out;
     const text = out.slice(0, READ_LIMIT).replace(/\s+$/, "");
     if (execution.timedOut) {
       return failed(`shell transport did not close within ${Math.ceil(transportMs / 1000)} seconds`,
         text ? { output: text } : {});
+    }
+    if (execution.error) {
+      return failed(`shell transport failed: ${execution.error}`, text ? { output: text } : {});
+    }
+    if (execution.code !== 0) {
+      const ending = execution.signal
+        ? `shell command ended by signal ${execution.signal}`
+        : `shell command exited with status ${execution.code}`;
+      return failed(ending, text ? { output: text } : {});
     }
     return out.length > READ_LIMIT
       ? success({ output: text, of: out.length, remaining: out.length - READ_LIMIT })
@@ -263,16 +302,16 @@ export class Body {
 
   async speak(text) {
     const spoken = text.trim();
-    if (!spoken) return failed(VOICE.messages.thinkNeedsText);
+    if (!spoken) return failed(VOICE.messages.innerSpeechNeedsText);
     this.onSpeak(spoken);
     // This proves only that the runtime accepted the speech action. It does
     // not observe a listener, hearing, attention, or any external response.
     return success({ characters: spoken.length });
   }
 
-  async think(text) {
+  async innerSpeech(text) {
     const thought = text.trim();
-    if (!thought) return failed(VOICE.messages.thinkNeedsText);
+    if (!thought) return failed(VOICE.messages.innerSpeechNeedsText);
     await this.onThink(thought);
     return success({ characters: thought.length });
   }
@@ -283,26 +322,44 @@ export class Body {
     return result(this.log.identify(identity));
   }
 
-  remember(kind, text, cue = "") {
-    const named = String(kind || "").trim();
+  remember(kind, name, text) {
+    const mental = String(kind || "").trim();
     const content = String(text || "").trim();
-    if (!named) return failed(VOICE.messages.rememberNeedsKind);
+    if (!mental) return failed(VOICE.messages.rememberNeedsKind);
     if (!content) return failed(VOICE.messages.rememberNeedsText);
-    return result(this.log.remember(named, content, cue));
+    return result(this.log.remember(mental, name, content));
   }
 
-  revise(query, text) {
-    const named = String(query || "").trim();
+  // Exact resolution of a name to the unit(s) that hold it — the handle every
+  // memory act reaches for. Names are the being's own words, matched
+  // case-insensitively with whitespace folded, never fuzzy across content.
+  // Standing goals are excluded: a goal is put down with resolve(), never
+  // shelved or forgotten as a memory. `states` chooses which recessions count.
+  matchNamed(name, states = ["active"]) {
+    const wanted = String(name || "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+    if (!wanted) return [];
+    const world = this.log.last("world");
+    const standing = this.log.standingIntentionIds();
+    const allow = new Set(states);
+    return this.log.units().filter((row) => {
+      if (row.kind !== "memory") return false;
+      if (!allow.has(row.state)) return false;
+      if (standing.has(row.id)) return false;
+      if (world && row.id > world.id) return false;
+      return String(row.meta?.name || "").trim().replace(/\s+/g, " ").toLocaleLowerCase() === wanted;
+    });
+  }
+
+  revise(name, text) {
+    const named = String(name || "").trim();
     const content = String(text || "").trim();
     if (!named) return failed(VOICE.messages.reviseNeedsMemory);
     if (!content) return failed(VOICE.messages.reviseNeedsText);
-    const matches = this.log.revisableMemories(named);
+    const matches = this.matchNamed(named);
     if (!matches.length) return failed(VOICE.messages.reviseNoMatch(named));
-    if (matches.length > 1) {
-      const options = matches.map((row) => `· ${firstLine(row.content)}`).join("\n");
-      return failed(VOICE.messages.reviseAmbiguous(named, options));
-    }
-    return result(this.log.revise(matches[0].id, content));
+    // The newest unit under the name is the one revised; the earlier wording
+    // stays in the record either way.
+    return result(this.log.revise(matches.at(-1).id, content));
   }
 
   async speakAloud(text) {
@@ -328,10 +385,10 @@ export class Body {
 
   // She commits to a goal that stands across moments — held in the INTENTION
   // view until she resolves it. Nothing is intended unless she says it is.
-  intend(text, success = "", cue = "") {
+  intend(text, success = "", cue = "", under = "", name = "") {
     const goal = String(text || "").trim();
     if (!goal) return failed(VOICE.messages.intendNeedsText);
-    return result(this.log.intend(goal, success, cue));
+    return result(this.log.intend(goal, success, cue, under, name));
   }
 
   progressIntent(query, evidence, next = "", cue = "") {
@@ -366,12 +423,12 @@ export class Body {
   // Google, through a signed-in browser. The results and the top pages both
   // come back as Markdown, so what she reads is the article rather than the
   // navigation around it.
-  // Test-only: when AMI_FAKE_SEARCH_FILE points at a { title, url, markdown }
+  // Test-only: when HERMIT_FAKE_SEARCH_FILE points at a { title, url, markdown }
   // JSON file, search() hands that back instead of calling the real web, so a
   // scenario can be staged deliberately rather than left to chance. Unset in
   // every normal run.
   fakeSearch() {
-    const file = process.env.AMI_FAKE_SEARCH_FILE;
+    const file = process.env.HERMIT_FAKE_SEARCH_FILE;
     if (!file) return null;
     try {
       return JSON.parse(readFileSync(file, "utf8"));
@@ -412,62 +469,32 @@ export class Body {
     });
   }
 
-  // Content-addressed lookup for shelve(): the active unit whose text (its call
-  // and result) contains the phrase. consolidate() no longer matches by phrase —
-  // it folds the whole working scratch — so this serves only the one caller that
-  // needs an exact memory. Three things it does not do, each on purpose. It
-  // matches the phrase literally, so one made only
-  // of digits still searches content instead of being read as a unit number —
-  // the record's search() has an exact-id shortcut that we must not reach here.
-  // It applies no result window, so an older unit is never dropped before the
-  // match is even considered. And it excludes units from this moment, which are
-  // not settled memory yet — reaching for one only draws back the record's note
-  // about it, the one place a raw id could still surface to her.
-  matchActive(phrase) {
-    const wanted = String(phrase ?? "").trim();
-    if (!wanted) return [];
-    const world = this.log.last("world");
-    return this.log.units().filter((row) => {
-      if (row.state !== "active") return false;
-      if (world && row.id > world.id) return false;
-      return phraseMatches(wanted, `${row.content}\n${row.result?.content || ""}`);
-    });
-  }
-
-  // She names a memory the way a person does — by what it was, not by a serial
-  // number. The phrase resolves by content; the row id is found underground and
-  // never asked of her. One match recedes; several means the phrase is too
-  // broad, so nothing is guessed and she is shown what it could mean so she can
-  // say it more precisely.
-  shelve(phrase) {
-    const wanted = String(phrase ?? "").trim();
-    if (!wanted) return failed(VOICE.messages.shelveNeedsPhrase);
-    const matches = this.matchActive(wanted);
+  // She reaches for a memory by the name she gave it — exactly, the way she
+  // reads it back from the room. The name is the label under which it recedes,
+  // and the same name restores it. Every active memory holding that name
+  // recedes at once, so a whole topic clears in one reach.
+  shelve(name) {
+    const wanted = String(name ?? "").trim();
+    if (!wanted) return failed(VOICE.messages.shelveNeedsName);
+    const matches = this.matchNamed(wanted);
     if (!matches.length) return failed(VOICE.messages.shelveNoMatch(wanted));
-    // Every active memory the phrase names recedes at once, so she can clear a
-    // whole topic in a single reach and keep a clean attention. Each one stays
-    // recallable — and the phrase becomes the folder's label in the SHELVED
-    // index, the reference that separates a shelve from a forget. One batch pass;
-    // shelving in a loop rebuilds the projection per unit (O(n²)).
     const done = new Set(this.log.shelfMany(matches.map((row) => row.id), wanted));
     const receded = matches.filter((row) => done.has(row.id)).map((row) => firstLine(row.content));
     if (!receded.length) return failed(VOICE.messages.shelveNoMatch(wanted));
     return success({ receded, count: receded.length });
   }
 
-  // Content-addressed lookup for forget(): every unit the phrase names that has
-  // not already been forgotten — active or shelved alike, since forgetting must
-  // reach even what she earlier only let recede. Units from the moment now
-  // beginning are excluded; they are not settled memory yet.
-  matchForget(phrase) {
-    const wanted = String(phrase ?? "").trim();
-    if (!wanted) return [];
-    const world = this.log.last("world");
-    return this.log.units().filter((row) => {
-      if (row.state === "forgotten") return false;
-      if (world && row.id > world.id) return false;
-      return phraseMatches(wanted, `${row.content}\n${row.result?.content || ""}`);
-    });
+  // The inverse of shelve: a name she set aside returns to the present. Only a
+  // shelved memory can come back; forgetting is the recession with no return.
+  restore(name) {
+    const wanted = String(name ?? "").trim();
+    if (!wanted) return failed(VOICE.messages.restoreNeedsName);
+    const matches = this.matchNamed(wanted, ["shelved"]);
+    if (!matches.length) return failed(VOICE.messages.restoreNoMatch(wanted));
+    const back = new Set(this.log.restore(matches.map((row) => row.id)));
+    const returned = matches.filter((row) => back.has(row.id)).map((row) => firstLine(row.content));
+    if (!returned.length) return failed(VOICE.messages.restoreNoMatch(wanted));
+    return success({ restored: returned, count: returned.length });
   }
 
   // She has thought enough about something and writes the lasting note. Her
@@ -484,7 +511,8 @@ export class Body {
   // important memories in with the episodic bloat. Also left standing: the
   // process acts that are not scratch (recall, shelve, feel, consolidate) and
   // the moment now beginning, whose units are not yet settled.
-  consolidate(text) {
+  consolidate(name, text) {
+    const handle = String(name ?? "").trim();
     const content = String(text ?? "").trim();
     if (!content) return failed(VOICE.messages.consolidateNeedsText);
     const world = this.log.last("world");
@@ -501,10 +529,10 @@ export class Body {
         || (row.kind === "action" && row.result && !isMemoryTransition(row.meta?.name))));
     if (!scratch.length) return failed(VOICE.messages.consolidateNothing);
     const folded = scratch.map((row) => firstLine(row.content));
-    const outcome = result(this.log.consolidate(scratch.map((row) => row.id), content));
-    // The log returns memory/source/shelved ids; none of them are hers to hold.
-    // She gets back the prose that receded and how much of it there was.
-    return outcome?.status === "failed" ? outcome : success({ folded, kept: folded.length });
+    // The fold is a named memory: restore(name) later brings its raw detail
+    // back beneath the summary. The source ids stay underground.
+    const outcome = result(this.log.consolidate(scratch.map((row) => row.id), content, handle));
+    return outcome?.status === "failed" ? outcome : success({ folded, kept: folded.length, ...(handle ? { name: handle } : {}) });
   }
 
   // She moves moments from the reserve into her own life. The mechanism and the
@@ -529,6 +557,7 @@ export class Body {
   // typical filesystem behavior... maybe the system flattened it?" — and never
   // could, because it was not true.
   async ls() {
+    if (this.onMachine) return this.lsMachine();
     await mkdir(this.workspace, { recursive: true });
     const names = await readdir(this.workspace);
     const written = this.writtenArtifacts();
@@ -581,7 +610,75 @@ export class Body {
     return String(text || "").split(path.resolve(this.workspace)).join("");
   }
 
+  // On a machine, files live where run() sees them (the agent's home), and are
+  // framed in base64 so no quoting can eat the content — the very thing that
+  // made heredoc writes corrupt Python twice over. Off a machine, the local
+  // workspace path below is unchanged.
+  async writeMachine(name, text) {
+    const b64path = Buffer.from(String(name), "utf8").toString("base64");
+    const b64text = Buffer.from(String(text ?? ""), "utf8").toString("base64");
+    const command = `set -e; p="$(printf %s '${b64path}' | base64 -d)"; mkdir -p "$(dirname "$p")"; printf %s '${b64text}' | base64 -d > "$p"; printf 'wrote %s' "$p"`;
+    const ex = await this.execMachine(command);
+    if (ex.unavailable) return failed(VOICE.messages.noMachine);
+    const out = String(ex.out || "").slice(0, 400).replace(/\s+$/, "");
+    if (ex.timedOut || ex.error || ex.code !== 0) {
+      return failed(`write to ${short(name)} did not complete`, out ? { output: out } : {});
+    }
+    return success({ path: name });
+  }
+
+  async readMachine(name) {
+    const b64path = Buffer.from(String(name), "utf8").toString("base64");
+    const command = `p="$(printf %s '${b64path}' | base64 -d)"; if [ ! -e "$p" ]; then printf __HERMIT_NOFILE__; exit 3; fi; if [ -d "$p" ]; then printf __HERMIT_ISDIR__; exit 4; fi; cat "$p"`;
+    const ex = await this.execMachine(command);
+    if (ex.unavailable) return failed(VOICE.messages.noMachine);
+    const out = String(ex.out || "");
+    if (ex.code === 3 || out.startsWith("__HERMIT_NOFILE__")) return failed(VOICE.messages.noSuchFile, { path: name });
+    if (ex.code === 4 || out.startsWith("__HERMIT_ISDIR__")) return failed(VOICE.messages.notAFile, { path: name });
+    if (ex.timedOut || ex.error || ex.code !== 0) return failed(`read of ${short(name)} did not complete`);
+    const text = out.slice(0, READ_LIMIT);
+    return out.length > READ_LIMIT
+      ? success({ path: name, text, of: out.length, remaining: out.length - READ_LIMIT })
+      : success({ path: name, text });
+  }
+
+  async lsMachine() {
+    const command = "for f in * .*; do case \"$f\" in .|..) continue;; esac; [ -e \"$f\" ] || continue; "
+      + "if [ -d \"$f\" ]; then printf 'D\\t%s\\t%s\\n' \"$f\" \"$(ls -A \"$f\" 2>/dev/null | wc -l)\"; "
+      + "else printf 'F\\t%s\\t%s\\n' \"$f\" \"$(stat -c %s \"$f\" 2>/dev/null)\"; fi; done";
+    const ex = await this.execMachine(command);
+    if (ex.unavailable) return failed(VOICE.messages.noMachine);
+    if (ex.timedOut || ex.error) return failed("the file listing did not complete");
+    const files = [];
+    for (const line of String(ex.out || "").split("\n")) {
+      const [kind, name, size] = line.split("\t");
+      if (!name) continue;
+      if (kind === "D") {
+        const n = Number(size) || 0;
+        files.push({ name, contains: `${n} ${n === 1 ? "thing" : "things"}` });
+      } else if (kind === "F") {
+        files.push({ name, bytes: Number(size) || 0 });
+      }
+    }
+    return success({ files });
+  }
+
+  async read(name) {
+    const named = String(name ?? "").trim();
+    if (!named) return failed(VOICE.messages.noSuchFile, { path: name });
+    if (this.onMachine) return this.readMachine(named);
+    try {
+      const file = this.resolve(named);
+      if (!file) return failed(VOICE.messages.outsideFiles, { path: name });
+      const text = await readFile(file, "utf8");
+      return success({ path: named, text });
+    } catch (error) {
+      return failed(error.code === "EISDIR" ? VOICE.messages.notAFile : VOICE.messages.noSuchFile, { path: name });
+    }
+  }
+
   async write(name, text) {
+    if (this.onMachine) return this.writeMachine(name, text);
     const file = this.resolve(name);
     if (!file) return failed(VOICE.messages.outsideFiles, { path: name });
     // mkdir used to sit outside this, so its errors escaped uncaught and
@@ -602,14 +699,32 @@ export class Body {
   }
 
   // Real deletion from her own record.
-  forget(query) {
-    const term = String(query || "").trim();
+  // Forget is the one recession with no return, and the only one that must
+  // reach an unnamed trace: a raw thought or a message that still stings has no
+  // handle of its own. So a named memory is matched by its exact name, but an
+  // unnamed episode is reached by describing it — the destructive escape hatch
+  // can always find the specific thing to let go. Standing goals are spared;
+  // a goal is put down with resolve(), not destroyed as a memory.
+  matchForget(term) {
+    const wanted = String(term ?? "").trim();
+    if (!wanted) return [];
+    const wantedName = wanted.replace(/\s+/g, " ").toLocaleLowerCase();
+    const world = this.log.last("world");
+    const standing = this.log.standingIntentionIds();
+    return this.log.units().filter((row) => {
+      if (row.state === "forgotten") return false;
+      if (standing.has(row.id)) return false;
+      if (world && row.id > world.id) return false;
+      const name = String(row.meta?.name || "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+      return name ? name === wantedName : phraseMatches(wanted, `${row.content}\n${row.result?.content || ""}`);
+    });
+  }
+
+  forget(name) {
+    const term = String(name || "").trim();
     if (!term) return failed(VOICE.messages.forgetNeedsTerm);
     const matches = this.matchForget(term);
     if (!matches.length) return failed(VOICE.messages.forgetNoMatch(term));
-    // Every memory the phrase names — in active attention or already shelved —
-    // is let go for good: gone from context and beyond recall. She gets back
-    // the sentences that left, never numbers; the rows stay as the kept copy.
     const forgotten = this.log.forget(matches.map((row) => row.id));
     const gone = matches.filter((row) => forgotten.includes(row.id)).map((row) => firstLine(row.content));
     if (!gone.length) return failed(VOICE.messages.forgetNoMatch(term));

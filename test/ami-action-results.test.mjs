@@ -6,7 +6,7 @@ import test from "node:test";
 
 test("every affordance returns only the success-or-failed contract", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "ami-action-results-"));
-  process.env.AMI_MAIL_FILE = path.join(directory, "letters.json");
+  process.env.HERMIT_MAIL_FILE = path.join(directory, "letters.json");
   const { Body } = await import(`../body.mjs?contract=${Date.now()}`);
 
   let nextSource = 100;
@@ -28,7 +28,7 @@ test("every affordance returns only the success-or-failed contract", async () =>
     set() {},
     // affordances()/sleep() read setup, and shelve()/consolidate() ask for the
     // last world; a minimal log must answer both or the contract check throws.
-    get(key, fallback) { return key === "setup_v2" ? { intention: true } : fallback; },
+    get(key, fallback) { return key === "setup_v2" ? { scaffoldVersion: 4, format: "faculties", intention: true } : fallback; },
     last() { return null; },
     lastSpoke() { return { id: 1 }; },
     modelResult(unit) { return unit.result?.content || ""; },
@@ -47,8 +47,8 @@ test("every affordance returns only the success-or-failed contract", async () =>
 
   try {
     const results = [
-      await body.run("think", ["inside"]),
-      await body.run("think", [""]),
+      await body.run("inner_speech", ["inside"]),
+      await body.run("inner_speech", [""]),
       await body.run("speak_aloud", ["hello"]),
       await body.run("search", [""]),
       await body.run("open", ["not-a-url"]),
@@ -90,26 +90,37 @@ test("every affordance returns only the success-or-failed contract", async () =>
     // used to send to a real account is not merely disabled — it is not a
     // form, and the room never lists it.
     assert.equal(body.formNames().includes("message"), false);
+    assert.equal(body.formNames().includes("inner_speech"), true);
+    // Hidden only for continuity with an existing life.
     assert.equal(body.formNames().includes("think"), true);
+    assert.equal(body.formNames().includes("identify"), false);
     assert.equal(body.formNames().includes("speak_aloud"), true);
     assert.equal(body.formNames().includes("speak"), false);
-    assert.deepEqual(body.affordances().find(([form]) => form === "think(text)"), ["think(text)", "think"]);
-    assert.deepEqual(body.affordances().find(([form]) => form === "speak_aloud(text)"), ["speak_aloud(text)", "speak aloud"]);
-    assert.deepEqual(body.affordances().find(([form]) => form === "identify(text)"), ["identify(text)", "identity"]);
-    assert.deepEqual(body.affordances().find(([form]) => form === "remember(kind, text, cue)"), [
-      "remember(kind, text, cue)",
-      "a memory of the named kind; an optional cue can bring it into foreground",
+    assert.deepEqual(body.affordances().find(([form]) => form === "<inner_speech>text</inner_speech>"), ["<inner_speech>text</inner_speech>", ""]);
+    assert.deepEqual(body.affordances().find(([form]) => form === "<speak_aloud>text</speak_aloud>"), ["<speak_aloud>text</speak_aloud>", ""]);
+    assert.equal(body.affordances().some(([form]) => form.includes("identify")), false);
+    assert.deepEqual(body.affordances().find(([form]) => form === '<remember kind="kind" name="name">text</remember>'), [
+      '<remember kind="kind" name="name">text</remember>',
+      "keeps text as an active memory named name",
     ]);
-    assert.deepEqual(body.affordances().find(([form]) => form === "revise(memory, text)"), ["revise(memory, text)", "revision of a matching memory"]);
-    assert.deepEqual(body.affordances().find(([form]) => form === "intend(goal, success, cue)"), [
-      "intend(goal, success, cue)",
-      "a standing intention with a success condition and an optional retrieval cue",
+    assert.deepEqual(body.affordances().find(([form]) => form === '<revise name="name">text</revise>'), ['<revise name="name">text</revise>', "the earlier wording stays in the record"]);
+    assert.deepEqual(body.affordances().find(([form]) => form === '<intend name="name" success="success" cue="cue" under="under">goal</intend>'), [
+      '<intend name="name" success="success" cue="cue" under="under">goal</intend>',
+      "keeps goal active under name until resolved; under names its parent intention",
     ]);
-    assert.deepEqual(body.affordances().find(([form]) => form === "progress(intention, evidence, next, cue)"), [
-      "progress(intention, evidence, next, cue)",
-      "evidence and the current next step of a standing intention",
+    assert.deepEqual(body.affordances().find(([form]) => form === '<progress intention="intention" next="next" cue="cue">evidence</progress>'), [
+      '<progress intention="intention" next="next" cue="cue">evidence</progress>',
+      "",
     ]);
-    assert.deepEqual(body.affordances().find(([form]) => form === "resolve(intention, outcome, evidence)"), ["resolve(intention, outcome, evidence)", "resolution"]);
+    assert.deepEqual(body.affordances().find(([form]) => form === '<resolve intention="intention" outcome="outcome">evidence</resolve>'), ['<resolve intention="intention" outcome="outcome">evidence</resolve>', ""]);
+
+    // Old, plain rooms retain the function notation, so archived responses and
+    // deliberately plain experiments remain reproducible.
+    const plainLog = { ...log, get(key, fallback) { return key === "setup_v2" ? { format: "plain", intention: true } : fallback; } };
+    const plainBody = new Body({ log: plainLog, workspace: path.join(directory, "plain-workspace") });
+    assert.deepEqual(plainBody.affordances().find(([form]) => form === "inner_speech(text)"), ["inner_speech(text)", ""]);
+    assert.equal((await plainBody.run("think", ["historical words"])).status, "success");
+    assert.equal(plainBody.formNames().includes("think"), true);
     const withoutPeer = new Body({ log, workspace: path.join(directory, "workspace") });
     const notDelivered = await withoutPeer.run("speak_aloud", ["anyone?"]);
     assert.equal(notDelivered.status, "failed");

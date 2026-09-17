@@ -31,7 +31,7 @@ export function buildMarkdown(log) {
     ].join(" · "),
   );
 
-  const thought = events.filter((e) => e.kind === "action" && ["speak", "think"].includes(e.meta?.name)).length;
+  const thought = events.filter((e) => e.kind === "action" && ["speak", "think", "inner_speech"].includes(e.meta?.name)).length;
   const spoke = events.filter((e) => e.kind === "action" && e.meta?.name === "speak_aloud").length;
   const said = events.filter((e) => e.kind === "incoming").length;
   const made = events.filter((e) => e.kind === "action" && e.meta?.name === "write").length;

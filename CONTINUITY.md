@@ -10,7 +10,7 @@ immutable event record
         | projection; no source row is rewritten
         v
 mutable subjective state
-identity · memories · beliefs · values · intentions
+memories · beliefs · values · intentions
         |
         | active state plus cue retrieval
         v
@@ -40,7 +40,7 @@ Work on temporal consciousness distinguishes the just-past that remains present,
 
 Clock time and elapsed time are absent from the default state. Exact timestamps
 remain in the observer archive. A duration enters the model-facing state only
-when it is a consequence of an explicit act such as `sleep()`.
+when it is a consequence of an explicit act such as `continue()`.
 
 Autobiographical memory is reconstructive and is shaped by current goals rather than replayed as a perfect recording ([Conway and Pleydell-Pearce](https://www.researchgate.net/publication/12528554_The_Construction_of_Autobiographical_Memories_in_the_Self-Memory_System)). The framework therefore keeps two deliberately different layers: an exact observer archive and fallible model-authored memory. The same constructive system also supports imagining possible futures ([Schacter, Addis, and Buckner](https://pmc.ncbi.nlm.nih.gov/articles/PMC2429996/)).
 
@@ -54,14 +54,14 @@ Prospective memory research treats intentions as often latent until an event, ti
 
 `resolve()` immediately removes the intention from the standing set. Its outcome is returned once and the completed intention remains recallable in latent memory. This separation matters because completed intentions can otherwise keep producing commission errors and aftereffects ([Anderson and Einstein](https://pmc.ncbi.nlm.nih.gov/articles/PMC7007322/)).
 
-Human inner experience also is not always verbal. Descriptive Experience Sampling reports inner speaking, imagery, feeling, sensory awareness, and unsymbolized thought, with substantial variation between people ([Heavey and Hurlburt](https://gwern.net/doc/psychology/inner-voice/2008-heavey.pdf)). This runtime cannot observe or store a nonverbal private state from a language model. `think(text)` records only text the model chose to emit; it is not treated as exhaustive evidence about experience.
+Human inner experience also is not always verbal. Descriptive Experience Sampling reports inner speaking, imagery, feeling, sensory awareness, and unsymbolized thought, with substantial variation between people ([Heavey and Hurlburt](https://gwern.net/doc/psychology/inner-voice/2008-heavey.pdf)). This runtime cannot observe or store a nonverbal private state from a language model. `<inner_speech>text</inner_speech>` records only self-addressed language the model chose to emit; it is not the provider's reasoning trace and is not treated as exhaustive evidence about experience.
 
 ## Scheduling
 
 Time passing is not itself a state transition. The runtime makes another model call only after one of these facts:
 
 - a prior continuation performed a real act;
-- `sleep()` set an explicit return;
+- `continue()` set an explicit return;
 - incoming speech arrived;
 - a provider error or malformed call requires a factual retry.
 
@@ -69,7 +69,7 @@ If none occurred, the life is idle rather than dead. This removes the former loo
 
 ## Boundaries and current limits
 
-- Identity is narrative and self-authored. The runtime supplies no name, personality, mission, belief, value, or motivation.
+- There is no separate identity state. A model-authored self-description can persist as an ordinary memory and can be revised, shelved, or forgotten like one. The runtime supplies no name, personality, mission, belief, value, or motivation.
 - Feelings are model-authored reports. No simulated body state is presented as emotion.
 - Cue matching is deterministic lexical retrieval, not human semantic memory. Exact cue text or distinctive cue words bring a cued durable memory into foreground.
 - Unconsolidated episodes remain visible. This ensures `consolidate()` never folds experiences hidden from the model.

@@ -89,7 +89,7 @@ export function points(log) {
     }
     if (event.kind === "action") {
       current.calls.push(event.meta?.name);
-      if (["speak", "think", "speak_aloud"].includes(event.meta?.name)) current.spoke = true;
+      if (["speak", "think", "inner_speech", "speak_aloud"].includes(event.meta?.name)) current.spoke = true;
     }
   }
   return list;

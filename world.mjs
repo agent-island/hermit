@@ -1,7 +1,27 @@
 import { fill } from "./setup.mjs";
 import { VOICE } from "./voice.mjs";
-import { latentMemoryLines, projectMemory, selectForegroundMemory } from "./memory-state.mjs";
+import { projectMemory, selectForegroundMemory, shelvedLines } from "./memory-state.mjs";
 import { loadRuntime, runtimeLines } from "./runtime.mjs";
+import { parseCalls } from "./mind.mjs";
+
+// Her voice, not acts awaiting a result. A moment that only thinks or speaks
+// leaves nothing in RETURNED, so it never needs the carried-out note.
+const VOICE_FACULTIES = new Set(["inner_speech", "think", "speak_aloud", "speak"]);
+
+// A write() she made carries the whole file in its body. That body is already
+// saved to the file and reachable with read(), so re-sending it in LAST every
+// moment only spends tokens re-showing code she wrote once — measured at ~2,800
+// tokens a moment on one run, drowning her actual reasoning in her own source.
+// The path and a size stay so she still sees what she wrote; the body is elided.
+function elideWriteBodies(content) {
+  return String(content).replace(
+    /(<write\b[^>]*>)([\s\S]*?)(<\/write>)/gi,
+    (_match, open, body, close) => {
+      const lines = String(body).split("\n").length;
+      return `${open} … ${lines} line${lines === 1 ? "" : "s"} written; read the file to see it … ${close}`;
+    },
+  );
+}
 
 // The only text that ever reaches her.
 //
@@ -21,13 +41,7 @@ export function renderWorld({ now, previousAt, body, log, setup, incoming, resul
   const visibleMemories = Number.isInteger(previousId)
     ? memories.filter((unit) => Number(unit.id) <= previousId)
     : memories;
-  const present = [
-    ...incoming.map((event) => event.content),
-    ...results.flatMap((one) => [one.call, one.value]),
-    previous?.content || previous || "",
-    ...files.map((file) => file.name),
-  ].join("\n");
-  const selected = selectForegroundMemory(visibleMemories, present, previousId);
+  const selected = selectForegroundMemory(visibleMemories);
   return fill(setup.template, {
     "{{time}}": now.toISOString(),
     "{{identity}}": identityLines(log.currentIdentity?.()),
@@ -35,7 +49,7 @@ export function renderWorld({ now, previousAt, body, log, setup, incoming, resul
       ? VOICE.world.sincePrevious(elapsed(now - new Date(previousAt)))
       : VOICE.world.firstMoment,
     // Never the host path. It used to print
-    // /…/Amiliya/server/autonomous-artificial-persona/ami/data/workspace, and
+    // /…/Amiliya/server/autonomous-artificial-persona/hermit/data/workspace, and
     // she read her identity straight off it — three moments old, she wrote a
     // manifest titled "AMI — Autonomous Artificial Persona" declaring her own
     // purpose and principles. Nothing in the room had told her any of that;
@@ -48,7 +62,7 @@ export function renderWorld({ now, previousAt, body, log, setup, incoming, resul
     "{{runtime}}": encodeLines(runtimeLines(loadRuntime(log)), tagged),
     // A bullet keeps these lines from being calls, which the padding used to
     // do — badly, since she copied the padding into calls that then never ran.
-    "{{forms}}": encodeLines(body.affordances().map(([form, does]) => `· ${form.padEnd(21)} ${does}`), tagged),
+    "{{forms}}": facultyLines(body.affordances(), tagged),
     // An empty section renders as a single dash. Three spelled-out absences
     // in a row ("nothing", "nothing was called at the previous moment",
     // "nothing is recorded") said the same thing three times, in words, in
@@ -64,15 +78,19 @@ export function renderWorld({ now, previousAt, body, log, setup, incoming, resul
     "{{memories}}": memoryLines(
       selected.foreground,
       attention,
-      log.shelfLabels(),
       setup.format,
     ),
-    "{{latent}}": latentMemoryLines(selected.latent),
+    "{{shelved}}": shelvedLines(log.shelfLabels()),
     // Standing goals she chose to hold, one per line. Empty when she has set
     // none (or the faculty is off), and fill() drops the section — so there is
     // never an empty INTENTION slot inviting her to fabricate one.
     "{{intentions}}": intentionLines(log.activeIntentions()),
-    "{{previous}}": previousLines(previous, tagged),
+    "{{previous}}": previousLines(
+      previous,
+      tagged,
+      typeof body?.formNames === "function" ? body.formNames() : [],
+      results,
+    ),
   });
 }
 
@@ -143,6 +161,19 @@ function encodeLines(lines, tagged) {
   return list.map(xmlText);
 }
 
+export function facultyLines(affordances, tagged = true) {
+  if (!tagged) return affordances.map(([form, does]) =>
+    does ? `· ${form.padEnd(21)} ${does}` : `· ${form}`);
+  return affordances.flatMap(([form, does]) => does
+    ? [`<form>${form}</form>`, `<effect>${xmlText(does)}</effect>`]
+    : [`<form>${form}</form>`]);
+}
+
+export function expandScaffold(template, affordances, tagged = true) {
+  return String(template ?? "").replace(/^(\s*)\{\{forms\}\}\s*$/m, (_line, indent) =>
+    facultyLines(affordances, tagged).map((line) => `${indent}${line}`).join("\n"));
+}
+
 function identityLines(identity) {
   if (!identity?.content) return [];
   return String(identity.content).split("\n").map(xmlText);
@@ -152,11 +183,13 @@ function intentionLines(intentions) {
   return intentions.flatMap((row) => {
     const meta = row.meta || {};
     const evidence = Array.isArray(meta.evidence) ? meta.evidence.filter(Boolean) : [];
+    const name = String(meta.name || "").trim();
     const lines = [
-      "<intention>",
+      name ? `<intention name="${xmlAttribute(name)}">` : "<intention>",
       `  <goal>${xmlText(String(row.content).replace(/\s+/g, " ").trim())}</goal>`,
     ];
     if (meta.success) lines.push(`  <success>${xmlText(meta.success)}</success>`);
+    if (meta.under) lines.push(`  <under>${xmlText(meta.under)}</under>`);
     if (meta.cue) lines.push(`  <cue>${xmlText(meta.cue)}</cue>`);
     if (evidence.length) {
       lines.push("  <progress>");
@@ -169,14 +202,44 @@ function intentionLines(intentions) {
   });
 }
 
-function previousLines(previous, tagged = false) {
+function previousLines(previous, tagged = false, known = [], results = []) {
   if (!previous) return [];
   const content = typeof previous === "string" ? previous : previous.content;
-  return encodeLines(content.split("\n"), tagged);
+  // Elide written file bodies, and drop the blank-line padding the model emits
+  // to match the room's indentation — leading/trailing empty lines carry nothing
+  // and re-sending them every moment is pure cost.
+  const rendered = elideWriteBodies(String(content))
+    .replace(/^(?:[ \t]*\n)+/, "")
+    .replace(/(?:\n[ \t]*)+$/, "");
+  const lines = encodeLines(rendered.split("\n"), tagged);
+  // The calls she wrote last moment sit here verbatim, but their results are up
+  // in RETURNED, earlier in the document — so a call at the very end of LAST can
+  // read as still pending when it has already run. One factual line closes that
+  // gap: the acts above are done, not awaiting a result. Without it, a completed
+  // run() shown again here has been misread as unreturned, and re-run.
+  if (Array.isArray(known) && known.length) {
+    try {
+      // Only a real act can be misread as pending. Pure inner speech and speech
+      // aloud are her voice, not an act awaiting a result, so a moment that only
+      // spoke or thought gets no note; a moment that ran, wrote, felt, or set a
+      // goal does.
+      const acts = parseCalls(content, known)
+        .filter((call) => !VOICE_FACULTIES.has(String(call.name)));
+      const recorded = new Map(
+        (Array.isArray(results) ? results : []).map((row) => [String(row.call), row.known !== false]),
+      );
+      if (acts.length && acts.every((call) => recorded.get(call.source) === true)) {
+        lines.push(encodeLines(["— every act above was already carried out; its result, if any, is in RETURNED."], tagged)[0]);
+      }
+    } catch {
+      // A malformed previous emission is not worth failing the whole room over.
+    }
+  }
+  return lines;
 }
 
-function memoryLines(memories, attention, shelved, format) {
-  const lines = projectMemory(memories, attention, shelved).lines;
+function memoryLines(memories, attention, format) {
+  const lines = projectMemory(memories, attention).lines;
   if (format !== "faculties") return lines;
   return lines.map((line) => xmlText(line.replace(
     "at the limit no further moment can form",

@@ -10,10 +10,10 @@ import { Observer, startPanel } from "../panel.mjs";
 
 test("peer speech enters the other life as heard words and requires the pair token", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "ami-peer-speech-"));
-  const priorToken = process.env.AMI_PEER_TOKEN;
-  const priorName = process.env.AMI_SELF_NAME;
-  process.env.AMI_PEER_TOKEN = "pair-secret-for-test";
-  process.env.AMI_SELF_NAME = "one";
+  const priorToken = process.env.HERMIT_PEER_TOKEN;
+  const priorName = process.env.HERMIT_SELF_NAME;
+  process.env.HERMIT_PEER_TOKEN = "pair-secret-for-test";
+  process.env.HERMIT_SELF_NAME = "one";
 
   const log = new Log(path.join(directory, "ami.sqlite"));
   const body = new Body({ log, workspace: path.join(directory, "workspace") });
@@ -60,10 +60,10 @@ test("peer speech enters the other life as heard words and requires the pair tok
     server.close();
     await once(server, "close");
     log.db.close();
-    if (priorToken === undefined) delete process.env.AMI_PEER_TOKEN;
-    else process.env.AMI_PEER_TOKEN = priorToken;
-    if (priorName === undefined) delete process.env.AMI_SELF_NAME;
-    else process.env.AMI_SELF_NAME = priorName;
+    if (priorToken === undefined) delete process.env.HERMIT_PEER_TOKEN;
+    else process.env.HERMIT_PEER_TOKEN = priorToken;
+    if (priorName === undefined) delete process.env.HERMIT_SELF_NAME;
+    else process.env.HERMIT_SELF_NAME = priorName;
     await rm(directory, { recursive: true, force: true });
   }
 });

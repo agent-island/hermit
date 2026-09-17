@@ -72,6 +72,21 @@ export function spendMoment(log) {
   return { active: true, died: false, own: ledger.own, reserve: ledger.reserve };
 }
 
+// Return a charge for an attempt that never became a lived moment. Provider
+// failures, an impossible prompt, an empty response, and a regenerated room
+// produce no words or acts attributable to the life. The room was rendered
+// after spendMoment(), so refunding rather than delaying the charge preserves
+// the truthful remaining count she saw while also making failed transport cost
+// nothing. The caller owns the once-only guard; this function performs one
+// refund when a finite ledger is still present.
+export function refundMoment(log) {
+  const ledger = loadRuntime(log);
+  if (!ledger) return { active: false, refunded: false };
+  ledger.own += 1;
+  log.set(KEY, ledger);
+  return { active: true, refunded: true, own: ledger.own, reserve: ledger.reserve };
+}
+
 // She moves moments out of the reserve into her own life. She takes what she
 // asks for, or what is left, whichever is smaller — a draw against an empty
 // reserve yields zero, which is a fact about the reserve, not a failure of

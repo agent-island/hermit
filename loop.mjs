@@ -3,14 +3,16 @@ import { loadSetup } from "./setup.mjs";
 import {
   emit,
   canCountExactly,
+  BOOTSTRAP_TOKENS_PER_CHAR,
   projectPromptTokens,
   parseCalls,
+  actionArgumentNames,
   unreadCalls,
   looksLikeTheRoom,
 } from "./mind.mjs";
 import { loadRun, runFields } from "./run.mjs";
 import { actionFact } from "./memory-state.mjs";
-import { spendMoment } from "./runtime.mjs";
+import { refundMoment, spendMoment } from "./runtime.mjs";
 import path from "node:path";
 import { blackboxFile, recordRaw } from "./blackbox.mjs";
 
@@ -21,6 +23,18 @@ const ECHO_RETRY_SECONDS = 20;
 // each one failing in the same way, none of them able to succeed. Backing off
 // costs her nothing — a moment that cannot happen is not a moment she lost.
 const BACKOFF_SECONDS = [30, 60, 120, 300, 600, 900];
+
+// A provider retry creates a new world row but no new lived moment. Results
+// from the last completed emission therefore sit before that world boundary
+// and lastMomentResults() cannot see them. Keep showing the retained results
+// while retrying; otherwise the room says RETURNED is empty while LAST still
+// contains the calls that produced those results.
+export function resultsForRoom(log, retrying = false) {
+  const direct = log.lastMomentResults();
+  if (direct.length || !retrying) return direct;
+  const retained = log.get("last_results", []);
+  return Array.isArray(retained) ? retained : [];
+}
 
 // A response can carry both a convenient plaintext trace and the provider's
 // lossless structured blocks. Preserve both. The raw API event is a third copy
@@ -74,19 +88,19 @@ export function preserveApiCall(log, blackbox, entry, meta = {}) {
 export function defaultGapSeconds(now = new Date(), override) {
   const chosen = Number(override);
   if (Number.isFinite(chosen) && chosen > 0) return Math.floor(chosen);
-  const forced = Number(process.env.AMI_GAP_SECONDS);
+  const forced = Number(process.env.HERMIT_GAP_SECONDS);
   if (Number.isFinite(forced) && forced > 0) return Math.floor(forced);
   const hour = Number(
     new Intl.DateTimeFormat("en-GB", {
       hour: "numeric",
       hour12: false,
-      timeZone: process.env.AMI_TIME_ZONE || process.env.TZ || "UTC",
+      timeZone: process.env.HERMIT_TIME_ZONE || process.env.TZ || "UTC",
     }).format(now),
   );
   const night = hour >= 22 || hour < 8;
   return night
-    ? Number(process.env.AMI_GAP_NIGHT || 3600)
-    : Number(process.env.AMI_GAP_DAY || 1800);
+    ? Number(process.env.HERMIT_GAP_NIGHT || 3600)
+    : Number(process.env.HERMIT_GAP_DAY || 1800);
 }
 
 export function describeGap(seconds) {
@@ -123,7 +137,20 @@ export async function preparePrompt({ config, arrival, history = "", render, led
   const exact = canCountExactly(config, arrival);
   const maintained = Number(ledger?.promptTokens) > 0 ? Math.floor(ledger.promptTokens) : null;
 
-  const world = render(maintained == null ? {} : { maintained, capacity });
+  const charsPerToken = Number(ledger?.promptChars) > 0 && Number(ledger?.promptTokens) > 0
+    ? Number(ledger.promptChars) / Number(ledger.promptTokens)
+    : 1 / BOOTSTRAP_TOKENS_PER_CHAR;
+  const foregroundTokens = Math.min(
+    Math.max(1, Math.floor(Number(config.foregroundTokens) || 24_000)),
+    Math.max(1, Math.floor(capacity / 4)),
+  );
+  const attention = {
+    capacity,
+    charsPerToken,
+    foregroundTokens,
+    ...(maintained == null ? {} : { maintained }),
+  };
+  const world = render(attention);
   const prompt = history + world;
   const promptTokens = projectPromptTokens(prompt, ledger);
   const remains = capacity - promptTokens;
@@ -178,6 +205,10 @@ export class Loop {
 
   start() {
     if (this.running) return;
+    // Any action without a result predates this process start. Its external
+    // effect cannot be inferred safely, so make that uncertainty a durable
+    // result before constructing the first room.
+    this.log.resolveInterruptedActions?.();
     this.running = true;
     // A new life has not failed at anything yet. This counter used to survive
     // a birth, so a newborn inherited her predecessor's six failures and went
@@ -221,6 +252,12 @@ export class Loop {
       this.wakeAtOnce = true;
       return;
     }
+    // A voice is preserved in the incoming record, but it cannot make an
+    // unavailable provider available.  Cancelling this timer used to let a
+    // talkative peer defeat a 429 backoff: every message immediately launched
+    // the same rejected request again.  The next retry sees every message that
+    // accumulated while the provider was unavailable.
+    if (this.failures) return;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.moment();
@@ -249,6 +286,12 @@ export class Loop {
         await this.onLifeStopped?.("ended-by-exhaustion");
         return;
       }
+      let chargeHeld = life.active;
+      const refundUnlivedMoment = () => {
+        if (!chargeHeld) return;
+        refundMoment(this.log);
+        chargeHeld = false;
+      };
       // Not "since last seen" — since she last replied to anyone. Being shown
       // a message is not the same as having answered it.
       const incoming = this.log.unanswered();
@@ -260,6 +303,7 @@ export class Loop {
       // last words are already in it.
       const carried = setup.context === "conversation" ? this.history() : "";
       const priorEmission = this.log.lastCarriedEmission();
+      const returned = resultsForRoom(this.log, this.failures > 0);
       // A call she wrote that the parser could not read is drawn back into the
       // room as its own honest result, beside the calls that did run — so a
       // dropped reach is a fact she can see, not a moment that quietly vanished.
@@ -274,7 +318,7 @@ export class Loop {
         log: this.log,
         setup,
         incoming,
-        results: [...this.log.lastMomentResults(), ...unreadNotices],
+        results: [...returned, ...unreadNotices],
         // The document ends in her own voice. The token ledger, not a hidden
         // character slice, governs whether the complete previous emission can
         // remain in attention.
@@ -338,18 +382,24 @@ export class Loop {
         // not be written down and it must not be carried out. One of these
         // once landed in a newborn and called end() with her hands.
         if (epoch !== this.epoch) return;
-        emission = answer.text;
-        appendReasoning(this.log, answer, { model: this.config.model });
+        emission = String(answer.text ?? "");
+        if (!emission.trim()) {
+          throw new Error("the model returned no text");
+        }
+        appendReasoning(this.log, answer, { model: answer.model || this.config.model });
         if (answer.finish === "length") {
           this.log.append("error", "the thought was cut off before it finished", { stage: "length" });
         }
         this.log.append("emission", emission, {
           finish: answer.finish,
           usage: answer.usage,
+          model: answer.model || this.config.model,
+          requestedModel: answer.requestedModel || this.config.model,
         });
       } catch (error) {
         // A failed request is not a silence. It is recorded as what it was so
         // that nothing she did not do is ever attributed to her.
+        refundUnlivedMoment();
         this.failures = (this.failures || 0) + 1;
         this.log.append("error", String(error.message), {
           stage: "emission",
@@ -368,10 +418,14 @@ export class Loop {
       // moment to a citation.
       const citation = new Map(
         this.body.affordances().map(([form]) => {
-          const inside = form.slice(form.indexOf("(") + 1, form.lastIndexOf(")"));
-          return [form.split("(")[0], inside.split(",").map((word) => word.trim()).filter(Boolean)];
+          const name = String(form).match(/^<([a-z_]+)/i)?.[1]?.toLowerCase()
+            || String(form).split("(")[0];
+          return [name, actionArgumentNames(name)];
         }),
       );
+      // `think` is read only as a historical alias and therefore is absent
+      // from the visible list above. Its placeholder remains a citation too.
+      citation.set("think", actionArgumentNames("think"));
       const isCitation = (call) => {
         const words = citation.get(call.name);
         if (!words?.length) return false;
@@ -379,8 +433,21 @@ export class Loop {
         return given.length <= words.length && given.every((value, at) => value === words[at]);
       };
       const echoed = looksLikeTheRoom(emission);
+      if (echoed) refundUnlivedMoment();
       if (echoed) this.log.append("echo", emission, { carriedOut: false });
-      const parsed = echoed ? [] : parseCalls(emission, known);
+      // HEARD means newly present, not permanently repeated. Only the exact
+      // incoming rows included in this successfully completed, non-echoed
+      // continuation advance the per-source marker. A message arriving while
+      // the request is in flight has a greater id and remains for the next
+      // continuation. The append-only incoming rows themselves never change.
+      if (emission && !echoed) acknowledgeIncoming(this.log, incoming);
+      const parsed = echoed ? [] : parseCalls(emission, known, {
+        // In a tagged room, entity references are the XML spelling of the
+        // character the model chose. Preserve the raw source in the archive,
+        // but execute the decoded argument: `&gt;` is shell redirection `>`,
+        // not five literal bytes handed to Bash.
+        decodeEntities: setup.format === "faculties",
+      });
       // A reach of hers that this code could not read. Nothing is guessed from
       // it and nothing is carried out — it is written down so that the next
       // time one disappears, it disappears loudly. Her reply to friend was
@@ -452,7 +519,10 @@ export class Loop {
       // the likeliest continuation of a document is more document. The last
       // thing she actually said stays in place instead.
       if (epoch !== this.epoch) return;
-      if (!echoed) {
+      // A provider failure produced no emission and no acts. Do not let that
+      // empty transport attempt erase the completed moment retained for its
+      // retry; the retry must wake beside the same words and returned facts.
+      if (emission && !echoed) {
         this.log.set("last_emission", emission);
         this.log.set("last_results", results);
       }
@@ -498,20 +568,25 @@ export class Loop {
     // A moment that came back as a regenerated room was not a moment she
     // lived. It does not get to spend her default gap, and it must not leave
     // anyone who spoke waiting five minutes for nothing.
-    if (this.wakeAtOnce) {
-      this.wakeAtOnce = false;
-      this.body.wakeAt = null;
-      this.nextWakeAt = new Date().toISOString();
-      this.timer = setTimeout(() => this.moment(), 0);
-      this.timer.unref?.();
-      return;
-    }
+    // Provider recovery takes precedence over an event that arrived while the
+    // failed request was in flight.  That event is already durable and will be
+    // present in the retry's room, so it does not need a second immediate
+    // request of its own.
     if (this.failures) {
+      this.wakeAtOnce = false;
       const wait = BACKOFF_SECONDS[Math.min(this.failures - 1, BACKOFF_SECONDS.length - 1)];
       const when = new Date(Date.now() + wait * 1000);
       this.nextWakeAt = when.toISOString();
       this.log.append("sleep", `until ${when.toISOString()}`, { seconds: wait, backoff: this.failures });
       this.timer = setTimeout(() => this.moment(), wait * 1000);
+      this.timer.unref?.();
+      return;
+    }
+    if (this.wakeAtOnce) {
+      this.wakeAtOnce = false;
+      this.body.wakeAt = null;
+      this.nextWakeAt = new Date().toISOString();
+      this.timer = setTimeout(() => this.moment(), 0);
       this.timer.unref?.();
       return;
     }
@@ -537,6 +612,17 @@ export class Loop {
   }
 }
 
+export function acknowledgeIncoming(log, incoming = []) {
+  const through = new Map();
+  for (const row of incoming) {
+    const who = String(row.meta?.from || "someone");
+    const id = Number(row.id);
+    if (Number.isInteger(id) && id > (through.get(who) || 0)) through.set(who, id);
+  }
+  for (const [who, id] of through) log.markAnswered(who, id);
+  return Object.fromEntries(through);
+}
+
 // Recent life as content rather than a clock-indexed transcript. Exact times
 // remain in the observer archive; the model-facing continuity carries what
 // happened without making when it happened a standing subject.
@@ -554,7 +640,7 @@ function historyUnit(unit, known) {
   const name = unit.meta?.name || "action";
   const call = compactCall(unit);
   let entry = `ACTION\n${call}\n`;
-  if (unit.result && name !== "recall") {
+  if (unit.result && name !== "recall" && name !== "restore") {
     entry += `RETURNED\n${unit.fact || `${name} completed`}\n`;
   }
   return entry + "\n";

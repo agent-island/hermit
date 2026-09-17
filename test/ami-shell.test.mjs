@@ -20,13 +20,13 @@ test("guest shell spools the script and output away from transport descriptors",
 
 test("run shell has a local transport deadline", async () => {
   const previous = {
-    host: process.env.AMI_SHELL_SSH,
-    exec: process.env.AMI_SHELL_EXEC,
-    timeout: process.env.AMI_SHELL_TRANSPORT_TIMEOUT_MS,
+    host: process.env.HERMIT_SHELL_SSH,
+    exec: process.env.HERMIT_SHELL_EXEC,
+    timeout: process.env.HERMIT_SHELL_TRANSPORT_TIMEOUT_MS,
   };
-  process.env.AMI_SHELL_SSH = "example.invalid";
-  process.env.AMI_SHELL_EXEC = "remote shell";
-  process.env.AMI_SHELL_TRANSPORT_TIMEOUT_MS = "10";
+  process.env.HERMIT_SHELL_SSH = "example.invalid";
+  process.env.HERMIT_SHELL_EXEC = "remote shell";
+  process.env.HERMIT_SHELL_TRANSPORT_TIMEOUT_MS = "10";
 
   let child;
   const spawnProcess = () => {
@@ -45,11 +45,55 @@ test("run shell has a local transport deadline", async () => {
     assert.match(result.reason, /transport did not close/);
     assert.equal(child.killedWith, "SIGTERM");
   } finally {
-    if (previous.host === undefined) delete process.env.AMI_SHELL_SSH;
-    else process.env.AMI_SHELL_SSH = previous.host;
-    if (previous.exec === undefined) delete process.env.AMI_SHELL_EXEC;
-    else process.env.AMI_SHELL_EXEC = previous.exec;
-    if (previous.timeout === undefined) delete process.env.AMI_SHELL_TRANSPORT_TIMEOUT_MS;
-    else process.env.AMI_SHELL_TRANSPORT_TIMEOUT_MS = previous.timeout;
+    if (previous.host === undefined) delete process.env.HERMIT_SHELL_SSH;
+    else process.env.HERMIT_SHELL_SSH = previous.host;
+    if (previous.exec === undefined) delete process.env.HERMIT_SHELL_EXEC;
+    else process.env.HERMIT_SHELL_EXEC = previous.exec;
+    if (previous.timeout === undefined) delete process.env.HERMIT_SHELL_TRANSPORT_TIMEOUT_MS;
+    else process.env.HERMIT_SHELL_TRANSPORT_TIMEOUT_MS = previous.timeout;
+  }
+});
+
+test("run shell reports a nonzero guest exit as failure and preserves its output", async () => {
+  const previous = {
+    host: process.env.HERMIT_SHELL_SSH,
+    exec: process.env.HERMIT_SHELL_EXEC,
+    timeout: process.env.HERMIT_SHELL_TRANSPORT_TIMEOUT_MS,
+  };
+  process.env.HERMIT_SHELL_SSH = "example.invalid";
+  process.env.HERMIT_SHELL_EXEC = "remote shell";
+  process.env.HERMIT_SHELL_TRANSPORT_TIMEOUT_MS = "1000";
+
+  const spawnProcess = () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.stdin = new Writable({
+      write(_chunk, _encoding, done) { done(); },
+      final(done) {
+        queueMicrotask(() => {
+          child.stderr.write("bash: syntax error");
+          child.emit("close", 2, null);
+        });
+        done();
+      },
+    });
+    child.kill = () => true;
+    return child;
+  };
+  const body = new Body({ log: {}, workspace: "", spawnProcess });
+
+  try {
+    const result = await body.runShell("broken command");
+    assert.equal(result.status, "failed");
+    assert.match(result.reason, /exited with status 2/);
+    assert.equal(result.output, "bash: syntax error");
+  } finally {
+    if (previous.host === undefined) delete process.env.HERMIT_SHELL_SSH;
+    else process.env.HERMIT_SHELL_SSH = previous.host;
+    if (previous.exec === undefined) delete process.env.HERMIT_SHELL_EXEC;
+    else process.env.HERMIT_SHELL_EXEC = previous.exec;
+    if (previous.timeout === undefined) delete process.env.HERMIT_SHELL_TRANSPORT_TIMEOUT_MS;
+    else process.env.HERMIT_SHELL_TRANSPORT_TIMEOUT_MS = previous.timeout;
   }
 });

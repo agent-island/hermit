@@ -9,24 +9,122 @@
 // inference from sense data, which may be simulated." The template was doing
 // more of the work than the checkpoint.
 // `stored` is whatever the panel saved. It wins over the environment: someone
-// who set AMI_MODEL in .env and then chose a different model in the panel
+// who set HERMIT_MODEL in .env and then chose a different model in the panel
 // meant the panel.
 import { ADAPTERS, endpointOf, buildRequest, readReply } from "./shapes.mjs";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { VOICE } from "./voice.mjs";
 
 const DEFAULT_MODEL = "z-ai/glm-5.2";
 let lastRequestStartedAt = 0;
+const activeModelByPool = new Map();
 
 async function waitForRequestInterval() {
-  const minimum = Math.max(0, Number(process.env.AMI_MIN_REQUEST_INTERVAL_MS) || 0);
+  const minimum = Math.max(0, Number(process.env.HERMIT_MIN_REQUEST_INTERVAL_MS) || 0);
   if (!minimum) return;
   const remaining = lastRequestStartedAt + minimum - Date.now();
   if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
   lastRequestStartedAt = Date.now();
 }
 
+// Two lives can share a provider account whose concurrency ceiling is one.
+// Their process-local timers cannot coordinate with each other, so an atomic
+// directory is the pair-wide in-flight lease. The response body is read before
+// release because the provider still counts a request as active until then.
+// A dead owner cannot strand the pair: its PID is checked before recovering a
+// stale lease, and an owner file that was never completed ages out.
+export async function acquireSharedRequestLock(lockPath = process.env.HERMIT_SHARED_REQUEST_LOCK) {
+  const lock = String(lockPath || "").trim();
+  if (!lock) return () => {};
+  for (;;) {
+    let created = false;
+    try {
+      mkdirSync(lock, { recursive: false });
+      created = true;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+
+    if (created) {
+      try {
+      writeFileSync(path.join(lock, "owner.json"), `${JSON.stringify({
+        pid: process.pid,
+        acquiredAt: new Date().toISOString(),
+      })}\n`);
+      } catch (error) {
+        // A pre-fix contender may still have removed this directory after our
+        // mkdir. Nothing was leased until owner.json existed, so retrying is
+        // exact and cannot duplicate an in-flight request.
+        if (error?.code === "ENOENT") continue;
+        throw error;
+      }
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try {
+          const owner = JSON.parse(readFileSync(path.join(lock, "owner.json"), "utf8"));
+          if (Number(owner.pid) === process.pid) rmSync(lock, { recursive: true, force: true });
+        } catch {
+          // Another process recovered it, or shutdown already removed it.
+        }
+      };
+    }
+
+    if (sharedRequestLockRecoverable(lock)) {
+      // Recovery itself needs a lease. Without it, two contenders can both
+      // inspect the same dead owner; one removes it and creates a fresh lock,
+      // then the other removes that fresh lock using its stale decision. The
+      // guard makes one contender re-check the owner immediately before the
+      // removal, while every other contender only waits.
+      const recovery = `${lock}.recovery`;
+      let ownsRecovery = false;
+      try {
+        mkdirSync(recovery, { recursive: false });
+        ownsRecovery = true;
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+      }
+      if (ownsRecovery) {
+        try {
+          if (sharedRequestLockRecoverable(lock)) {
+            rmSync(lock, { recursive: true, force: true });
+          }
+        } finally {
+          rmSync(recovery, { recursive: true, force: true });
+        }
+        continue;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+function sharedRequestLockRecoverable(lock) {
+  try {
+    const owner = JSON.parse(readFileSync(path.join(lock, "owner.json"), "utf8"));
+    try {
+      process.kill(Number(owner.pid), 0);
+      return false;
+    } catch {
+      return true;
+    }
+  } catch {
+    try {
+      // mkdir necessarily becomes visible just before owner.json. A contender
+      // observing that small honest window waits; only an abandoned directory
+      // old enough to be impossible as an ordinary write is recoverable.
+      return Date.now() - statSync(lock).mtimeMs > 15_000;
+    } catch {
+      return true;
+    }
+  }
+}
+
 export function configFromEnv(env = process.env, stored = {}) {
   // Prefill beats everything else here, so a prefill-capable endpoint wins
-  // over LOCAL_AGENT_PROVIDER unless AMI_BASE_URL says otherwise.
+  // over LOCAL_AGENT_PROVIDER unless HERMIT_BASE_URL says otherwise.
   const compatible = {
     baseUrl: String(env.OPENAI_COMPATIBLE_BASE_URL || "").trim(),
     apiKey: String(env.OPENAI_COMPATIBLE_API_KEY || "").trim(),
@@ -41,16 +139,16 @@ export function configFromEnv(env = process.env, stored = {}) {
     String(env.LOCAL_AGENT_PROVIDER || "").trim().toLowerCase() === "groq" &&
     !prefillFlag(compatible.baseUrl);
   const fallback = preferGroq ? groqSet : compatible.baseUrl ? compatible : groqSet;
-  const baseUrl = stored.baseUrl || String(env.AMI_BASE_URL || "").trim() || fallback.baseUrl;
+  const baseUrl = stored.baseUrl || String(env.HERMIT_BASE_URL || "").trim() || fallback.baseUrl;
   const model = stored.model
-    || String(env.AMI_MODEL || "").trim()
+    || String(env.HERMIT_MODEL || "").trim()
     || (/openrouter\.ai/i.test(baseUrl) ? DEFAULT_MODEL : fallback.model);
 
   const config = {
     baseUrl,
-    apiKey: stored.apiKey || String(env.AMI_API_KEY || "").trim() || fallback.apiKey,
+    apiKey: stored.apiKey || String(env.HERMIT_API_KEY || "").trim() || fallback.apiKey,
     model,
-    temperature: Number(stored.temperature ?? env.AMI_TEMPERATURE ?? 1),
+    temperature: Number(stored.temperature ?? env.HERMIT_TEMPERATURE ?? 1),
     // 2048 cut 143 of her thoughts off mid-sentence — 4% of everything she
     // has ever said — and she was never told. An invisible ceiling is worse
     // than a stated one: she cannot even work around it. Output is only ~9%
@@ -61,22 +159,36 @@ export function configFromEnv(env = process.env, stored = {}) {
     // never cut by us, only by what the model itself can produce, and paid for
     // only on the rare thought that runs that long. She manages her own memory
     // with consolidate/shelve/forget; we impose no limit of our own but context.
-    maxTokens: Number(stored.maxTokens ?? env.AMI_MAX_TOKENS ?? 65536),
+    maxTokens: Number(stored.maxTokens ?? env.HERMIT_MAX_TOKENS ?? 65536),
+    // Episodic working memory is a foreground, not the archive. Older active
+    // units remain latent and recallable once this many calibrated prompt
+    // tokens are occupied by newer episodes. Durable authored memories and
+    // standing intentions have their own retrieval rules and are not evicted
+    // by this operator-side attention budget.
+    foregroundTokens: Math.max(1, Math.floor(Number(env.HERMIT_FOREGROUND_TOKENS) || 24_000)),
     // Reasoning effort, when the model supports it. Not a stored field (loadModel
     // strips it), so the environment controls it cleanly — no repeat of the
-    // model/temperature override trap. AMI_REASONING_EFFORT=high|medium|low|off.
+    // model/temperature override trap. HERMIT_REASONING_EFFORT=high|medium|low|off.
     reasoning: (() => {
-      const e = String(env.AMI_REASONING_EFFORT || "").trim().toLowerCase();
+      const e = String(env.HERMIT_REASONING_EFFORT || "").trim().toLowerCase();
       if (!e) return null;
       if (e === "off" || e === "none" || e === "false") return { enabled: false };
       return { effort: e };
     })(),
-    endpoint: String(stored.endpoint || env.AMI_ENDPOINT || "").trim().toLowerCase(),
+    endpoint: String(stored.endpoint || env.HERMIT_ENDPOINT || "").trim().toLowerCase(),
   };
-  const contextTokens = Number(stored.contextTokens ?? env.AMI_CONTEXT_TOKENS ?? NaN);
+  // A fallback is allowed to become this same mind only after it has passed
+  // the same continuation probe as the primary. Launchers therefore name the
+  // small audited pool explicitly; OpenRouter's broad automatic router is not
+  // used, because it can turn a bare completion into an ordinary chat reply.
+  config.modelFallbacks = [...new Set(String(env.HERMIT_MODEL_FALLBACKS || "")
+    .split(/[\n,]/)
+    .map((one) => one.trim())
+    .filter((one) => one && one !== model))];
+  const contextTokens = Number(stored.contextTokens ?? env.HERMIT_CONTEXT_TOKENS ?? NaN);
   if (!Number.isFinite(contextTokens) || contextTokens < 1) {
     throw new Error(
-      `the total context size for ${config.model || "this model"} is unknown; set AMI_CONTEXT_TOKENS`,
+      `the total context size for ${config.model || "this model"} is unknown; set HERMIT_CONTEXT_TOKENS`,
     );
   }
   config.contextTokens = Math.floor(contextTokens);
@@ -97,7 +209,10 @@ export function configFromEnv(env = process.env, stored = {}) {
   // a trailing assistant turn and gpt-oss-120b refuses it. Anthropic supported
   // assistant prefill for years and removed it in Claude 4.6. Use the panel's
   // detection, which asks the endpoint instead of assuming.
-  config.prefill = (ADAPTERS[stored.prefill] ? stored.prefill : null) || prefillFlag(config.baseUrl);
+  const requestedPrefill = String(env.HERMIT_PREFILL || "").trim().toLowerCase();
+  config.prefill = (ADAPTERS[stored.prefill] ? stored.prefill : null)
+    || (ADAPTERS[requestedPrefill] ? requestedPrefill : null)
+    || prefillFlag(config.baseUrl);
   if (!config.endpoint) config.endpoint = config.prefill === "completions" ? "completions" : "prefix";
   // Nothing runs without prefill. The room has to arrive as an open turn she
   // continues; delivered any other way it is a question, and what answers a
@@ -105,8 +220,8 @@ export function configFromEnv(env = process.env, stored = {}) {
   // anyway would produce something that looks like it worked.
   if (!config.prefill && config.endpoint !== "completions") {
     throw new Error(
-      `${config.baseUrl} cannot continue text, so Project AA cannot use it.\n\n` +
-        `  Open http://127.0.0.1:${process.env.AMI_PORT || 7717} and press "Test model" — it will\n` +
+      `${config.baseUrl} cannot continue text, so Hermit cannot use it.\n\n` +
+        `  Open http://127.0.0.1:${process.env.HERMIT_PORT || 7717} and press "Test model" — it will\n` +
         `  find the right settings if there are any.\n\n` +
         `  Use a continuation-capable provider adapter or a local completion\n` +
         `  server such as Ollama, LM Studio, llama.cpp, or vLLM.`,
@@ -139,11 +254,11 @@ export async function lookupContextTokens({ baseUrl, apiKey, model }) {
 // that a model nobody has hand-configured still starts. Anything already set
 // explicitly is left alone — this only ever supplies a missing fact.
 export async function resolveContextTokens(env = process.env, stored = {}) {
-  if (stored.contextTokens || env.AMI_CONTEXT_TOKENS) return stored;
-  const baseUrl = stored.baseUrl || String(env.AMI_BASE_URL || "").trim();
-  const model = stored.model || String(env.AMI_MODEL || "").trim();
+  if (stored.contextTokens || env.HERMIT_CONTEXT_TOKENS) return stored;
+  const baseUrl = stored.baseUrl || String(env.HERMIT_BASE_URL || "").trim();
+  const model = stored.model || String(env.HERMIT_MODEL || "").trim();
   if (!baseUrl || !model) return stored;
-  const apiKey = stored.apiKey || String(env.AMI_API_KEY || "").trim();
+  const apiKey = stored.apiKey || String(env.HERMIT_API_KEY || "").trim();
   const contextTokens = await lookupContextTokens({ baseUrl, apiKey, model }).catch(() => null);
   return contextTokens ? { ...stored, contextTokens } : stored;
 }
@@ -165,7 +280,7 @@ export function canCountExactly() {
 // the model's native tokenizer for a prompt whose exact length we know, so
 // after one moment this is calibrated for that model on that text. The
 // bootstrap value is only ever used for the first prompt of a life.
-const BOOTSTRAP_TOKENS_PER_CHAR = 0.34;
+export const BOOTSTRAP_TOKENS_PER_CHAR = 0.34;
 
 export function projectPromptTokens(text, ledger = null) {
   const chars = String(text ?? "").length;
@@ -203,8 +318,19 @@ const HEADERS = ["TIME", "BODY", "ROOM", "WORKSPACE", "FORM", "INCOMING",
 const BARE_HEADER = /^[ \t]{0,4}[A-Z][A-Z_]*(?: [A-Z_]+)*[ \t]*$/;
 
 export function looksLikeTheRoom(text) {
+  const source = String(text || "");
+  // The current room is XML. A model can continue past its own act and
+  // generate another complete state, including fabricated RETURNED facts. If
+  // that replica is treated as ordinary output, every <run> inside the fiction
+  // becomes a real command. Require the root plus all three structural regions
+  // so a legitimate sentence mentioning one tag is not mistaken for an echo.
+  if (/<state(?:\s[^>]*)?>/i.test(source)
+    && /<continuity(?:\s[^>]*)?>/i.test(source)
+    && /<faculties(?:\s[^>]*)?>/i.test(source)
+    && /<present(?:\s[^>]*)?>/i.test(source)) return true;
+
   const seen = new Set();
-  for (const line of String(text || "").split("\n")) {
+  for (const line of source.split("\n")) {
     const word = line.trim();
     if (word.length < 3 || word.length > 24) continue;
     if (HEADERS.includes(word) || BARE_HEADER.test(line)) seen.add(word);
@@ -243,63 +369,95 @@ export async function emit(config, world, arrival = config.endpoint, onCall = nu
   }
   const mode = shape;
   const url = endpointOf(shape, config.baseUrl);
-  const request = buildRequest(shape, {
-    model: config.model,
-    text: `${world}\n`,
-    stop: STOP,
-    temperature: config.temperature,
-    maxTokens: config.maxTokens,
-    reasoning: config.reasoning,
-    run: config.run,
-  });
+  const pool = [...new Set([config.model, ...(config.modelFallbacks || [])].filter(Boolean))];
+  const poolKey = `${url}\0${pool.join("\0")}`;
+  const active = activeModelByPool.get(poolKey);
+  const activeAt = pool.indexOf(active);
+  const models = activeAt > 0
+    ? [...pool.slice(activeAt), ...pool.slice(0, activeAt)]
+    : pool;
+  let lastError = null;
 
-  // Optional process-local request ceiling. A pair gives each of its two
-  // processes a six-second minimum interval, so together they cannot begin
-  // more than twenty requests in any minute. The default is zero: ordinary
-  // lives are unchanged unless a launcher explicitly supplies the interval.
-  await waitForRequestInterval();
-  const call = { url, mode, request, startedAt: new Date().toISOString() };
-  const began = Date.now();
-
-  let response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers: ADAPTERS[shape].headers(config.apiKey),
-      body: JSON.stringify(request),
-      // A high-effort reasoning model can think for minutes before its first
-      // token; 120s cut deepseek off mid-thought and burned the whole moment.
-      // Generous ceiling, env-overridable — long enough never to bite a real
-      // response, finite only so a genuinely hung request can't wedge the loop.
-      signal: AbortSignal.timeout(Number(process.env.AMI_REQUEST_TIMEOUT_MS) || 600_000),
+  for (let at = 0; at < models.length; at += 1) {
+    const model = models[at];
+    const request = buildRequest(shape, {
+      model,
+      text: `${world}\n`,
+      stop: STOP,
+      temperature: config.temperature,
+      maxTokens: config.maxTokens,
+      reasoning: config.reasoning,
+      run: config.run,
     });
-  } catch (error) {
+
+    // Every attempt retains the exact audited wire shape. In particular, this
+    // does not use OpenRouter's `models` array: measured on /completions, that
+    // router changed "one … seven" into a chat reply about "the user" instead
+    // of continuing with "eight".
+    await waitForRequestInterval();
+    const releaseRequestLock = await acquireSharedRequestLock();
+    const call = { url, mode, model, request, startedAt: new Date().toISOString() };
+    const began = Date.now();
+    let response;
+    let text;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: ADAPTERS[shape].headers(config.apiKey),
+        body: JSON.stringify(request),
+        signal: AbortSignal.timeout(Number(process.env.HERMIT_REQUEST_TIMEOUT_MS) || 600_000),
+      });
+      text = await response.text();
+    } catch (error) {
+      call.ms = Date.now() - began;
+      call.failed = String(error.message);
+      onCall?.(call);
+      lastError = error;
+      if (at + 1 < models.length) continue;
+      throw error;
+    } finally {
+      releaseRequestLock();
+    }
+
     call.ms = Date.now() - began;
-    call.failed = String(error.message);
+    call.status = response.status;
+    call.raw = text;
+    if (!response.ok) {
+      onCall?.(call);
+      lastError = new Error(`${response.status} ${text.slice(0, 400)}`);
+      const unavailable = [403, 404, 408, 409, 422, 429].includes(response.status)
+        || response.status >= 500;
+      if (unavailable && at + 1 < models.length) continue;
+      throw lastError;
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch (error) {
+      call.failed = `unparseable response: ${error.message}`;
+      onCall?.(call);
+      lastError = error;
+      if (at + 1 < models.length) continue;
+      throw error;
+    }
+    const reply = readReply(shape, payload);
+    if (!String(reply.text || "").trim() && at + 1 < models.length) {
+      call.failed = "the model returned no text";
+      onCall?.(call);
+      lastError = new Error(call.failed);
+      continue;
+    }
     onCall?.(call);
-    throw error;
+    activeModelByPool.set(poolKey, model);
+    return {
+      ...reply,
+      model: String(payload.model || model),
+      requestedModel: model,
+    };
   }
 
-  const text = await response.text();
-  call.ms = Date.now() - began;
-  call.status = response.status;
-  call.raw = text;
-  if (!response.ok) {
-    onCall?.(call);
-    throw new Error(`${response.status} ${text.slice(0, 400)}`);
-  }
-
-  let payload;
-  try {
-    payload = JSON.parse(text);
-  } catch (error) {
-    call.failed = `unparseable response: ${error.message}`;
-    onCall?.(call);
-    throw error;
-  }
-  onCall?.(call);
-
-  return readReply(shape, payload);
+  throw lastError || new Error("no model in the continuation pool returned a response");
 }
 
 // A line that is exactly a call is carried out. Everything else she emits is
@@ -336,7 +494,7 @@ const CALL_MAX_LINES = Infinity;
 // only recognised at a line's start or immediately after another call, so prose
 // that merely mentions read("x") mid-sentence, and the bulleted form list, stay
 // inert. A wrapped call still ends its line and needs its closing * or **.
-export function parseCalls(text, known) {
+export function parseCalls(text, known, { decodeEntities = false } = {}) {
   const calls = [];
   // The identical call twice in one emission is one act, not two. A model can
   // draft a call and then repeat it in final form; repetition is not a request
@@ -373,7 +531,13 @@ export function parseCalls(text, known) {
       : [lines[i].slice(col), ...lines.slice(i + 1, close.line), lines[close.line].slice(0, endAt)].join("\n")).trim();
     if (!seen.has(source)) {
       seen.add(source);
-      calls.push({ name, args: parseArgs(inner), source, line: i });
+      const args = parseArgs(inner);
+      calls.push({
+        name,
+        args: decodeEntities ? args.map(decodeTaggedValue) : args,
+        source,
+        line: i,
+      });
     }
     // A wrapped call ends its line — the closing * or ** closes it and nothing
     // legible follows. An unwrapped call may be followed on the same line by
@@ -385,7 +549,201 @@ export function parseCalls(text, known) {
     if (next && known.includes(next[2].toLowerCase())) col = nextCol;
     else { i += 1; col = 0; }
   }
+  // Models sometimes answer a tagged state with tagged acts. These are not
+  // inferred from prose:
+  // only an element whose name is an available faculty and whose complete
+  // block occupies its own line(s) is an act. Keep its exact XML-like source
+  // in the event record; only the parsed name and arguments are normalised.
+  for (const call of parseTaggedCalls(text, known)) {
+    if (seen.has(call.source)) continue;
+    seen.add(call.source);
+    calls.push(call);
+  }
+  // Tagged and parenthesised acts may coexist. Array#sort is stable, so calls
+  // beginning on one line retain the order in which their syntax was read.
+  calls.sort((a, b) => a.line - b.line);
   return calls;
+}
+
+function parseTaggedCalls(text, known) {
+  const allowed = [...new Set(known.map((name) => String(name).toLowerCase()))]
+    .filter((name) => /^[a-z_]+$/.test(name));
+  if (!allowed.length) return [];
+  const names = allowed.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  // Some models (Union Alpha among them) copy the menu's own <form>…</form>
+  // wrapper around every act they emit. The matchers below are line-anchored, so
+  // a wrapped tag lands mid-line and is never read as an act — the life then does
+  // nothing and idles. Strip a <form> wrapper only where it directly encloses a
+  // known faculty, so any <form> that a write() body carries is left untouched.
+  let sourceText = String(text || "");
+  sourceText = sourceText
+    .replace(new RegExp(`<form>[ \\t]*(?=<(?:${names})\\b)`, "gi"), "")
+    .replace(new RegExp(`(</(?:${names})>|<(?:${names})\\b[^>]*/>)[ \\t]*</form>`, "gi"), "$1");
+  const found = [];
+
+  // Paired elements include all forms observed in the live K2.6 record:
+  //   <run>ls -la</run>
+  //   <remember>kind="moment", text="...", cue="..."</remember>
+  //   <intend goal="..." success="..." cue="..."></intend>
+  //   <speak_aloud(text="...")>\n</speak_aloud>
+  const paired = new RegExp(
+    `(^|\\n)[ \\t]*(?:\x60{3}(?:html|xml)?[ \\t]*)?<(${names})\\b([^>]*)>([\\s\\S]*?)<\\/\\2>[ \\t]*(?=\\n|$)`,
+    "gi",
+  );
+  let match;
+  while ((match = paired.exec(sourceText))) {
+    // Providers occasionally prefix the first act with ```html on the same
+    // line. The fence is presentation, not part of the act; locating the '<'
+    // preserves the exact element source and its original archive separately.
+    const start = match.index + match[0].indexOf("<", match[1].length);
+    const source = sourceText.slice(start, paired.lastIndex).trim();
+    found.push({
+      name: match[2].toLowerCase(),
+      args: taggedArguments(match[2].toLowerCase(), match[3], match[4]),
+      source,
+      line: sourceText.slice(0, start).split("\n").length - 1,
+    });
+  }
+
+  // Zero-argument faculties are often emitted as <sleep/>, <ls/>, or <end/>.
+  const empty = new RegExp(
+    `(^|\\n)[ \\t]*(?:\x60{3}(?:html|xml)?[ \\t]*)?<(${names})[ \\t]*\\/>[ \\t]*(?=\\n|$)`,
+    "gi",
+  );
+  while ((match = empty.exec(sourceText))) {
+    const start = match.index + match[0].indexOf("<", match[1].length);
+    const name = match[2].toLowerCase();
+    if (actionArgumentNames(name).length) continue;
+    found.push({
+      name,
+      args: [],
+      source: sourceText.slice(start, empty.lastIndex).trim(),
+      line: sourceText.slice(0, start).split("\n").length - 1,
+    });
+  }
+
+  return found.sort((a, b) => a.line - b.line);
+}
+
+// The argument a tagged faculty carries as its element body — the token that
+// appears between the tags in its form, e.g. `goal` in
+// <intend …>goal</intend> or `text` in <remember …>text</remember>.
+function taggedBodyArgument(name) {
+  const tagged = String(VOICE.actions?.[name]?.tagged || "");
+  const match = tagged.match(/>\s*([a-z_][a-z0-9_]*)\s*</i);
+  return match ? match[1] : "";
+}
+
+function taggedArguments(name, openingTail, body) {
+  const expected = actionArgumentNames(name);
+  if (!expected.length) return [];
+  const tail = String(openingTail || "").trim();
+
+  // K2.6 has emitted <speak_aloud(text="...")>. It is not XML, but it is an
+  // unambiguous faculty element: the parentheses contain the same argument
+  // syntax already accepted by the ordinary parser.
+  if (tail.startsWith("(") && tail.endsWith(")")) {
+    return parseArgs(tail.slice(1, -1)).map(decodeTaggedValue);
+  }
+
+  const rawInside = String(body ?? "");
+  const inside = rawInside.trim();
+  const attributes = taggedAttributes(tail);
+  if (attributes.size) {
+    const values = new Map(attributes);
+    // XML naturally keeps compact metadata in attributes and long language in
+    // the element body: <write path="note.txt">the text</write>. The tagged
+    // form itself names which argument is the body — the token between its
+    // tags — so an optional attribute left off (e.g. intend's `under`) never
+    // strands the body. Falls back to the sole missing argument for any form
+    // whose body token is not one of its own arguments.
+    const bodyArg = taggedBodyArgument(name);
+    const missing = expected.filter((argument) => !values.has(argument));
+    // A tagged write is the one faculty whose element body is a byte-bearing
+    // payload rather than a scalar. XML entities still spell their semantic
+    // characters, but whitespace, JSON-looking text, quotes, and backslashes
+    // are the file itself and must not pass through taggedScalar().
+    const hasBody = name === "write" ? rawInside.length > 0 : inside.length > 0;
+    const bodyValue = name === "write"
+      ? decodeXmlEntities(rawInside)
+      : taggedScalar(inside);
+    if (hasBody) {
+      if (bodyArg && expected.includes(bodyArg) && !values.has(bodyArg)) {
+        values.set(bodyArg, bodyValue);
+      } else if (missing.length === 1) {
+        values.set(missing[0], bodyValue);
+      }
+    }
+    return orderedTaggedValues(expected, values);
+  }
+
+  const named = taggedNamedBody(inside);
+  if (named.size) return orderedTaggedValues(expected, named);
+  if (expected.length === 1) return [taggedScalar(inside)];
+  const positional = splitTopLevel(inside);
+  if (positional.length <= expected.length) return positional.map(taggedScalar);
+  return parseArgs(inside).map(decodeTaggedValue);
+}
+
+export function actionArgumentNames(name) {
+  const form = VOICE.actions?.[name]?.form || `${name}()`;
+  const open = form.indexOf("(");
+  const close = form.lastIndexOf(")");
+  if (open < 0 || close <= open + 1) return [];
+  return splitTopLevel(form.slice(open + 1, close)).map((part) => part.trim()).filter(Boolean);
+}
+
+function taggedAttributes(text) {
+  const values = new Map();
+  const re = /([a-z_][a-z0-9_]*)\s*=\s*(?:"((?:\\.|[^"])*)"|'((?:\\.|[^'])*)'|([^\s>]+))/gi;
+  let match;
+  while ((match = re.exec(String(text || "")))) {
+    const raw = match[2] ?? match[3] ?? match[4] ?? "";
+    values.set(match[1].toLowerCase(), taggedScalar(raw));
+  }
+  return values;
+}
+
+function taggedNamedBody(text) {
+  const values = new Map();
+  const parts = splitTopLevel(String(text || ""));
+  for (const part of parts) {
+    const match = part.match(/^\s*([a-z_][a-z0-9_]*)\s*=\s*([\s\S]*)$/i);
+    if (!match) return new Map();
+    values.set(match[1].toLowerCase(), taggedScalar(match[2]));
+  }
+  return values;
+}
+
+function orderedTaggedValues(expected, values) {
+  let last = -1;
+  for (let index = 0; index < expected.length; index += 1) {
+    if (values.has(expected[index])) last = index;
+  }
+  if (last < 0) return [];
+  return expected.slice(0, last + 1).map((name) => values.get(name) ?? "");
+}
+
+function taggedScalar(raw) {
+  const text = decodeXmlEntities(String(raw || "").trim());
+  try {
+    return JSON.parse(text);
+  } catch {
+    return unquote(text);
+  }
+}
+
+function decodeTaggedValue(value) {
+  return typeof value === "string" ? decodeXmlEntities(value) : value;
+}
+
+function decodeXmlEntities(value) {
+  return String(value)
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
 }
 
 // Where this call's opening bracket closes, quote-aware, across lines. Null if

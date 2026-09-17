@@ -123,7 +123,7 @@ const ev = DATA.events;
 const first = ev[0], last = ev[ev.length-1];
 const moments = ev.filter(e=>e.kind==="world").length;
 const calls = ev.filter(e=>e.kind==="action").length;
-const thought = ev.filter(e=>e.kind==="action"&&(e.meta.name==="speak"||e.meta.name==="think")).length;
+const thought = ev.filter(e=>e.kind==="action"&&(e.meta.name==="speak"||e.meta.name==="think"||e.meta.name==="inner_speech")).length;
 const spoke = ev.filter(e=>e.kind==="action"&&e.meta.name==="speak_aloud").length;
 const alive = first&&last ? (new Date(last.at)-new Date(first.at))/1000 : 0;
 const dur = s => s<60?Math.round(s)+"s":s<3600?Math.round(s/60)+"m":(s/3600).toFixed(1)+"h";
@@ -183,7 +183,7 @@ document.getElementById("table").innerHTML='<thead><tr><th>at</th><th>kind</th><
 
 // Run directly to write the file; imported by the panel to serve it live.
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const root = process.env.AMI_DATA || path.join(path.dirname(fileURLToPath(import.meta.url)), "data");
+  const root = process.env.HERMIT_DATA || path.join(path.dirname(fileURLToPath(import.meta.url)), "data");
   const out = process.argv[2] || path.join(root, "life.html");
   const log = new Log(path.join(root, "ami.sqlite"));
   await writeFile(out, buildLife(log), "utf8");

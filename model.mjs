@@ -6,7 +6,7 @@
 // copied into every one of those, and the archives are the part people share.
 // It is also not hers to see: nothing here ever reaches the room.
 //
-// Precedence is stored-over-environment. Someone who sets AMI_MODEL in .env and
+// Precedence is stored-over-environment. Someone who sets HERMIT_MODEL in .env and
 // then picks a different model in the panel meant the panel.
 import path from "node:path";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { ADAPTERS, SHAPES, endpointOf, buildRequest, readReply } from "./shapes.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const FILE = process.env.AMI_MODEL_FILE || path.join(here, "link", "model.json");
+const FILE = process.env.HERMIT_MODEL_FILE || path.join(here, "link", "model.json");
 
 const FIELDS = ["baseUrl", "apiKey", "model", "temperature", "maxTokens", "contextTokens", "endpoint", "prefill"];
 
@@ -48,6 +48,7 @@ export function describeModel(config) {
   return {
     baseUrl: config.baseUrl || "",
     model: config.model || "",
+    modelFallbacks: config.modelFallbacks || [],
     temperature: config.temperature,
     maxTokens: config.maxTokens,
     contextTokens: config.contextTokens,
@@ -81,7 +82,10 @@ export async function probe({ baseUrl, apiKey, model, prefill }) {
   const request = buildRequest(shape, {
     model,
     text: "one two three four five six seven",
-    temperature: 0,
+    // Kimi K2.5/K2.6 reject every temperature other than 1. Their documented
+    // Partial Mode remains a deterministic continuation check because the
+    // unfinished count has only one natural next token.
+    temperature: /^kimi-k2\.(?:5|6)$/i.test(String(model)) ? 1 : 0,
     maxTokens: 1024,
   });
 
@@ -114,8 +118,8 @@ export async function probe({ baseUrl, apiKey, model, prefill }) {
     ok: continued,
     continued: said.replace(/\s+/g, " ").slice(0, 70),
     note: continued
-      ? "Works. This model continues text, so Project AA can use it."
-      : "This model replies instead of continuing the text, so Project AA cannot use it.",
+      ? "Works. This model continues text, so Hermit can use it."
+      : "This model replies instead of continuing the text, so Hermit cannot use it.",
   };
 }
 
@@ -131,7 +135,7 @@ export async function detect({ baseUrl, apiKey, model }) {
         endpoint: shape === "completions" ? "completions" : "prefix",
         prefill: shape,
         continued: result.continued,
-        note: "Works. Project AA can use this model.",
+        note: "Works. Hermit can use this model.",
         tried,
       };
     }
@@ -142,6 +146,6 @@ export async function detect({ baseUrl, apiKey, model }) {
     tried,
     endpoint: null,
     prefill: null,
-    note: "This model cannot continue text, so Project AA will not run on it. Models that do work include compatible continuation endpoints and local completion servers such as Ollama, LM Studio, llama.cpp, and vLLM.",
+    note: "This model cannot continue text, so Hermit will not run on it. Models that do work include compatible continuation endpoints and local completion servers such as Ollama, LM Studio, llama.cpp, and vLLM.",
   };
 }

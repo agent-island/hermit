@@ -1,5 +1,5 @@
 {
-  "name": "project-autonomous-agent",
+  "name": "hermit",
   "version": "0.2.0",
   "private": true,
   "type": "module",

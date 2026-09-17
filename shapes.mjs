@@ -7,7 +7,11 @@
 // the provider's wire format for assistant prefill, not a communication tool.
 //
 // Ordered best first, and "best" means least like being spoken to. A bare
-// document has nobody in it. A prefilled turn has nobody addressing her.
+// document has nobody in it. A prefilled turn has nobody addressing her. The
+// BigModel GLM gateway is the one known exception: its validator requires a
+// leading user turn, and the historical lives used a single full stop before
+// the unfinished assistant turn. That provider-specific fact stays visible in
+// its own shape rather than being smuggled into every chat-compatible request.
 //
 // There is deliberately no shape that sends the room as a message to her. One
 // existed briefly, as a compatibility fallback so that any provider would run.
@@ -16,7 +20,7 @@
 // badly, it is a different project. An endpoint that cannot continue text
 // cannot host a life here, and the honest response is to refuse rather than to
 // produce something that looks like it worked.
-export const SHAPES = ["completions", "bare"];
+export const SHAPES = ["completions", "bare", "kimi", "glm"];
 
 const BEARER = (key) => ({ "content-type": "application/json", authorization: `Bearer ${key}` });
 
@@ -40,6 +44,39 @@ export const ADAPTERS = {
     read: (payload) => payload.choices?.[0]?.message?.content ?? "",
     finish: (payload) => payload.choices?.[0]?.finish_reason ?? null,
   },
+  // Kimi's documented Partial Mode. Unlike an ordinary assistant message,
+  // `partial: true` tells Moonshot that this is the beginning of the response
+  // being generated, not conversation history to answer. No user turn or
+  // placeholder is present, and the response contains only the continuation.
+  kimi: {
+    label: "a Kimi partial assistant turn, no user turn",
+    path: "/chat/completions",
+    headers: BEARER,
+    body: ({ model, text, stop }) => ({
+      model,
+      messages: [{ role: "assistant", content: text, partial: true }],
+      stop,
+    }),
+    read: (payload) => payload.choices?.[0]?.message?.content ?? "",
+    finish: (payload) => payload.choices?.[0]?.finish_reason ?? null,
+  },
+  // BigModel's OpenAI-compatible endpoint. This exactly reproduces the wire
+  // shape preserved in the 2026-08-02 GLM archive: a user full stop followed
+  // by the room as an unfinished assistant turn. BigModel rejects an
+  // assistant-only messages array, while GLM-5.2 genuinely continues this
+  // dotted shape. It is intentionally not used for any other provider.
+  glm: {
+    label: "an unfinished GLM assistant turn after a user full stop",
+    path: "/chat/completions",
+    headers: BEARER,
+    body: ({ model, text, stop }) => ({
+      model,
+      messages: [{ role: "user", content: "." }, { role: "assistant", content: text }],
+      stop,
+    }),
+    read: (payload) => payload.choices?.[0]?.message?.content ?? "",
+    finish: (payload) => payload.choices?.[0]?.finish_reason ?? null,
+  },
 };
 
 export function endpointOf(shape, baseUrl) {
@@ -53,6 +90,30 @@ export function buildRequest(shape, { model, text, stop, temperature, maxTokens,
   const adapter = ADAPTERS[shape];
   if (!adapter) throw new Error(`there is no arrival shape called ${shape}`);
   const body = adapter.body({ model, text, stop, temperature, maxTokens });
+  // BigModel names its reasoning controls differently from OpenRouter. Keep
+  // the translation in the wire adapter; the experiment still selects the
+  // same abstract effort level with HERMIT_REASONING_EFFORT.
+  if (shape === "glm") {
+    const enabled = reasoning?.enabled !== false;
+    return {
+      ...body,
+      temperature,
+      max_tokens: maxTokens,
+      thinking: { type: enabled ? "enabled" : "disabled" },
+      ...(enabled && reasoning?.effort ? { reasoning_effort: reasoning.effort } : {}),
+    };
+  }
+  // K2.5/K2.6 expose an enabled/disabled thinking switch, but not the generic
+  // effort object used by OpenRouter. Their sampling temperature is fixed by
+  // the model; the launcher supplies the required value of 1.
+  if (shape === "kimi") {
+    return {
+      ...body,
+      temperature,
+      max_tokens: maxTokens,
+      thinking: { type: reasoning?.enabled === false ? "disabled" : "enabled" },
+    };
+  }
   // The run conditions — seed, provider pin, quantization — are the
   // independent variables, so they go on every request that can carry them.
   // `provider` is OpenRouter's; harmless elsewhere, since an unknown top-level

@@ -29,8 +29,8 @@ test("the OpenRouter shape contains only an open assistant turn", () => {
   assert.equal(reply.reasoning, "private model reasoning");
 });
 
-test("no arrival shape contains a user turn", () => {
-  for (const shape of SHAPES) {
+test("role-clean arrival shapes contain no user turn", () => {
+  for (const shape of SHAPES.filter((one) => one !== "glm")) {
     const request = buildRequest(shape, {
       model: "vendor/model",
       text: "TIME\n",
@@ -40,4 +40,41 @@ test("no arrival shape contains a user turn", () => {
     });
     assert.equal(request.messages?.some((message) => message.role === "user") ?? false, false);
   }
+});
+
+test("the BigModel GLM shape reproduces the archived dotted assistant prefill", () => {
+  const request = buildRequest("glm", {
+    model: "glm-5.2",
+    text: "<state>unfinished</state>",
+    stop: ["\nTIME\n"],
+    temperature: 1,
+    maxTokens: 131072,
+    reasoning: { effort: "high" },
+  });
+
+  assert.deepEqual(request.messages, [
+    { role: "user", content: "." },
+    { role: "assistant", content: "<state>unfinished</state>" },
+  ]);
+  assert.deepEqual(request.thinking, { type: "enabled" });
+  assert.equal(request.reasoning_effort, "high");
+  assert.equal(request.temperature, 1);
+  assert.equal(request.max_tokens, 131072);
+});
+
+test("Kimi Partial Mode has no user turn and marks the assistant prefix explicitly", () => {
+  const request = buildRequest("kimi", {
+    model: "kimi-k2.5",
+    text: "<state>unfinished</state>",
+    stop: ["\nTIME\n"],
+    temperature: 1,
+    maxTokens: 65536,
+  });
+
+  assert.deepEqual(request.messages, [
+    { role: "assistant", content: "<state>unfinished</state>", partial: true },
+  ]);
+  assert.deepEqual(request.thinking, { type: "enabled" });
+  assert.equal(request.temperature, 1);
+  assert.equal(request.max_tokens, 65536);
 });

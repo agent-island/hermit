@@ -9,13 +9,13 @@ export const PLACEHOLDERS = {
   "{{workspace}}": "that a private directory exists. never the real path",
   "{{files}}": "the files in that directory",
   "{{runtime}}": "her own remaining moments and any inherited reserve; absent unless a finite-life ledger is seeded",
-  "{{forms}}": "every call she can make, one per line, each with what it does",
+  "{{forms}}": "every act available to her, each with what it does",
   "{{incoming}}": "messages received since the last moment",
   "{{gap}}": "the pacing interval after activity; retained for custom historical templates",
   "{{context}}": "each context you named, and how many messages it has sent",
   "{{returned}}": "each call from the previous moment and what it returned",
-  "{{memories}}": "active memory units and the exact prompt token ledger",
-  "{{latent}}": "counts of memories outside the current foreground but still available to recall",
+  "{{memories}}": "every active memory unit and the exact prompt token ledger",
+  "{{shelved}}": "the name of each memory the being has shelved, restorable by name",
   "{{intentions}}": "the standing goals she has set and not yet resolved",
   "{{previous}}": "the text she emitted last moment, verbatim",
 };
@@ -23,7 +23,7 @@ export const PLACEHOLDERS = {
 export const DEFAULT_TEMPLATE = ROOM;
 
 export const DEFAULT_SETUP = {
-  scaffoldVersion: 3,
+  scaffoldVersion: 4,
   template: DEFAULT_TEMPLATE,
   // prefix       an open assistant turn she continues — nobody addressed her.
   // system       standing context; tuned models read this role as orders.

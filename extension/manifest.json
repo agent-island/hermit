@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Project AA",
+  "name": "Hermit",
   "version": "0.2.0",
   "permissions": [
     "scripting",
@@ -14,7 +14,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Project AA",
+    "default_title": "Hermit",
     "default_popup": "popup.html"
   }
 }

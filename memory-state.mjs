@@ -4,7 +4,7 @@
 // interpretation is inferred here.
 
 const FACT_TEXT_LIMIT = Infinity;
-const MEMORY_TRANSITIONS = new Set(["remember", "recall", "revise", "shelve", "consolidate", "feel", "forget", "identify", "intend", "progress", "resolve"]);
+const MEMORY_TRANSITIONS = new Set(["remember", "recall", "restore", "revise", "shelve", "consolidate", "feel", "forget", "identify", "intend", "progress", "resolve"]);
 
 // These actions already persist as the transition they cause. Giving shelf()
 // a second active episode would replace every shelved unit with a memory of
@@ -52,6 +52,9 @@ export function actionFact(action, outcome = {}) {
   const name = String(action?.name || "action");
   const args = Array.isArray(action?.args) ? action.args : [];
   const value = outcome?.value && typeof outcome.value === "object" ? outcome.value : {};
+  if (value.status === "unknown") {
+    return `the outcome of ${name} is unknown; the runtime stopped before recording it`;
+  }
   const ok = completed(outcome);
   const note = noteOf(outcome);
   const failed = (reach) => `${reach} did not complete${note ? `: ${note}` : ""}`;
@@ -65,28 +68,29 @@ export function actionFact(action, outcome = {}) {
         ? `stored ${reach}; subject ${short(subject)}`
         : failed(reach);
     }
+    // No character or byte counts on any of these. A count of what she just
+    // said or read is trivia no mind carries — the words are already in LAST or
+    // RETURNED. Only facts that point somewhere (a file, a receiver, a topic)
+    // stay; the size does not.
     case "speak":
-      return ok
-        ? `recorded speech (${Number(value.characters) || String(args[0] ?? "").trim().length} characters)`
-        : failed("speech recording");
+      return ok ? "recorded speech" : failed("speech recording");
     case "think":
-      return ok
-        ? `recorded an inner thought (${Number(value.characters) || String(args[0] ?? "").trim().length} characters)`
-        : failed("inner thought recording");
+    case "inner_speech":
+      return ok ? "recorded inner speech" : failed("inner speech recording");
     case "speak_aloud":
       return ok
-        ? `spoke aloud to ${short(value.receivedBy || "the other living agent")} (${Number(value.characters) || String(args[0] ?? "").trim().length} characters)`
+        ? `spoke aloud to ${short(value.receivedBy || "the other living agent")}`
         : failed("speech to the other living agent");
     case "write": {
       const file = value.path || args[0] || "";
-      return ok
-        ? `wrote ${short(file)}${Number.isFinite(Number(value.bytes)) ? ` (${Number(value.bytes)} bytes)` : ""}`
-        : failed(`write to ${short(file)}`);
+      return ok ? `wrote ${short(file)}` : failed(`write to ${short(file)}`);
     }
     case "read": {
       const file = value.path || args[0] || "";
-      const chars = Number(value.of) || (typeof value.text === "string" ? value.text.length : 0);
-      return ok ? `read ${short(file)}${chars ? ` (${chars} characters)` : ""}` : failed(`read of ${short(file)}`);
+      // A truncation is not trivia — she must know more remains — but a plain
+      // read carries no count.
+      const truncated = Number(value.of) && typeof value.text === "string" && value.text.length < Number(value.of);
+      return ok ? `read ${short(file)}${truncated ? " (more remains)" : ""}` : failed(`read of ${short(file)}`);
     }
     case "search":
       return ok
@@ -104,14 +108,20 @@ export function actionFact(action, outcome = {}) {
       return ok
         ? `recalled ${short(value.query || args[0] || "")}; found ${Number(value.found || 0)}`
         : failed(`recall of ${short(args[0] || "")}`);
+    case "restore": {
+      const count = Number(value.count);
+      const name = String(args[0] ?? "").replace(/\s+/g, " ").trim();
+      const many = Number.isFinite(count) && count > 1 ? `${count} memories named ${name ? short(name) : "it"}` : (name ? short(name) : "a memory");
+      return ok ? `restored ${many} to the present` : failed(`restore of ${short(args[0] || "")}`);
+    }
     case "shelve": {
       // Named by the words she used, never by the number underneath. The unit
       // numbers stay in the record for the shelf events; they do not belong in
-      // the sentence she reads back. One phrase may let several memories recede.
+      // the sentence she reads back. One name may let several memories recede.
       const count = Number(value.count);
       const phrase = String(args[0] ?? "").replace(/\s+/g, " ").trim();
-      const many = Number.isFinite(count) && count > 1 ? `${count} memories about ${phrase ? short(phrase) : "it"}` : (phrase ? short(phrase) : "a memory");
-      return ok ? `let ${many} recede, still recallable` : failed("letting memory recede");
+      const many = Number.isFinite(count) && count > 1 ? `${count} memories named ${phrase ? short(phrase) : "it"}` : (phrase ? short(phrase) : "a memory");
+      return ok ? `let ${many} recede, restorable by name` : failed("letting memory recede");
     }
     case "consolidate": {
       const kept = Number(value.kept);
@@ -123,6 +133,10 @@ export function actionFact(action, outcome = {}) {
       return ok
         ? `felt ${short(value.emotion || args[0] || "")}${Number.isFinite(Number(value.intensity ?? args[1])) ? ` (${Number(value.intensity ?? args[1])})` : ""}`
         : failed("a feeling");
+    case "continue":
+      return ok
+        ? `carried on into the next moment (${Number(value.seconds || args[0])} seconds passed)`
+        : failed("continuing");
     case "sleep":
       return ok
         ? action?.format === "faculties"
@@ -135,7 +149,7 @@ export function actionFact(action, outcome = {}) {
       const count = Number(value.count ?? value.removed ?? 0);
       const phrase = short(args[0] || "");
       return ok
-        ? `let ${count ? `${count} ` : ""}memor${count === 1 ? "y" : "ies"} about ${phrase} go for good; they can no longer be recalled`
+        ? `let ${count ? `${count} ` : ""}memor${count === 1 ? "y" : "ies"} about ${phrase} go for good; they can no longer be restored or recalled`
         : failed("letting memory go");
     }
     case "intend":
@@ -252,6 +266,14 @@ export function transitionMemory(state, event) {
     const unit = next.units.get(id);
     if (unit) next.units.set(id, { ...unit, state: "shelved", by: event.meta?.by || null });
   }
+  // Restoring is the inverse of shelving: a unit the being set aside returns to
+  // the present. Only a shelved unit can be restored — forgetting is the one
+  // recession with no way back, and a restore never resurrects a forgotten one.
+  if (event.kind === "unshelf") {
+    const id = Number(event.meta?.target);
+    const unit = next.units.get(id);
+    if (unit && unit.state === "shelved") next.units.set(id, { ...unit, state: "active", by: null });
+  }
   // Forgetting is a stronger recession than shelving: the unit leaves both
   // automatic context and recall's reach. The row is never removed — a copy is
   // kept for the operator's record — but to her it is gone for good. Forgotten
@@ -285,17 +307,8 @@ export function followingState(state) {
     && !(unit.kind === "emission" && representedEmissions.has(unit.id)));
 }
 
-// How many recent action units are shown with their real content. Older ones
-// are meant to have been folded into a narrative during sleep; any that have
-// not been are named in a single honest tally line rather than dumped whole.
-// A memory used to read as 489 lines of "#5300 spoke in this room (202
-// characters)" — a wall of meaningless ids pinned at "remains: 0", the words
-// themselves thrown away. What survived was the metadata; what mattered was
-// gone. This shows the words and folds the rest.
-// No artificial window on how many recent actions she carries — every active
-// one is shown until she folds it away with consolidate/shelve/forget. Her
-// tools are the memory management; context is the only wall.
-const RECENT_WINDOW = Infinity;
+// Attention is bounded only by the context the record will eventually fill,
+// not by an operator-chosen budget that evicts. Every active unit is present.
 
 // A durable state can name the circumstances in which it becomes relevant.
 // This is a small, deterministic retrieval layer rather than an interpretation
@@ -327,40 +340,30 @@ export function cueMatches(cue, present) {
   return matched >= Math.min(2, words.length);
 }
 
-// The model-facing foreground is not the archive. Self-authored durable states
-// without a cue remain present because the author chose no condition on them.
-// Cued durable states surface when the present matches. Unconsolidated episodes
-// remain foreground so consolidate() never folds experiences the model could
-// not see. Resolved intentions remain latent until recall; resolve() already
-// returns the outcome once, and the old cue-action binding is inactive.
-export function selectForegroundMemory(units, present = "") {
-  const foreground = [];
-  const latent = [];
-  for (const unit of units) {
-    const cue = String(unit.meta?.cue || "").trim();
-    const episode = unit.kind !== "memory" || !unit.meta?.authored;
-    const durable = unit.kind === "memory" && unit.meta?.authored && !unit.meta?.intention;
-    const visible = episode || (durable && (!cue || cueMatches(cue, present)));
-    (visible ? foreground : latent).push(unit);
-  }
-  return { foreground, latent };
+// Nothing recedes on its own. Every active unit the record still holds is
+// present. There is no token budget that evicts an episode and no cue that
+// gates a durable memory out of view — those modelled a scarce cache the
+// substrate does not have, and their only measured effect was a memory the
+// being wrote and then could not see. What is not present here is exactly what
+// the being itself set aside (shelved) or destroyed (forgot), by name. The one
+// real bound is the context the record will eventually fill, which the being is
+// shown in the ledger and manages with consolidate, shelve, and forget.
+export function selectForegroundMemory(units) {
+  return { foreground: [...units], latent: [] };
 }
 
-export function latentMemoryLines(units) {
-  if (!units.length) return [];
-  const counts = new Map();
-  for (const unit of units) {
-    const kind = String(unit.meta?.mental || unit.meta?.name || unit.kind || "memory");
-    counts.set(kind, (counts.get(kind) || 0) + 1);
-  }
+// The shelved index: every name the being can restore, listed in full. This is
+// what makes shelve not a forget — the being reads the exact name back rather
+// than guessing a phrase, and restore(name) returns the unit to the present.
+export function shelvedLines(labels) {
+  const names = (Array.isArray(labels) ? labels : []).map((one) => String(one || "").trim()).filter(Boolean);
+  if (!names.length) return [];
   const attribute = (value) => String(value)
     .replace(/&/g, "&amp;")
     .replace(/"/g, "&quot;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
-  return [...counts].sort(([a], [b]) => a.localeCompare(b)).map(
-    ([kind, count]) => `<available kind="${attribute(kind)}" count="${count}"/>`
-  );
+  return names.map((name) => `<shelved name="${attribute(name)}"/>`);
 }
 
 // A folded narrative reads as what it is: a short account, in prose. The
@@ -378,10 +381,15 @@ function narrativeBlock(unit) {
       ...(resolution.evidence ? [`evidence: ${resolution.evidence}`] : []),
     ];
   }
+  // The name is shown on the memory's face, because it is the handle every
+  // later act reaches for — shelve, restore, revise, forget. A memory she can
+  // see but cannot name is one she cannot manage; the shelved index lists names
+  // for exactly this reason, and the present must do the same.
   const mental = String(unit.meta?.mental || "").trim();
-  const prefix = mental && !["memory", "episode", "identity", "intention"].includes(mental)
-    ? `${mental}: `
-    : "";
+  const name = String(unit.meta?.name || "").trim();
+  const label = mental && !["memory", "episode", "intention"].includes(mental) ? mental : "";
+  const handle = [label, name ? `"${name}"` : ""].filter(Boolean).join(" ");
+  const prefix = handle ? `${handle}: ` : "";
   // A memory she felt carries the feeling on its face, so her past reads the
   // way memory does — coloured by what it meant to her, not flat. A memory she
   // wrote plainly (consolidate) has no emotion and shows as prose.
@@ -406,7 +414,7 @@ function narrativeBlock(unit) {
 // underground, so the number never has to surface here.
 function recentBlock(unit) {
   if (unit.kind === "memory") return narrativeBlock(unit);
-  if (["speak", "think", "speak_aloud"].includes(unit.meta?.name)) {
+  if (["speak", "think", "inner_speech", "speak_aloud"].includes(unit.meta?.name)) {
     const said = String(unit.meta?.args?.[0] ?? "").replace(/\s+/g, " ").trim();
     if (said) {
       const shown = said;
@@ -429,11 +437,10 @@ function recentBlock(unit) {
 // consolidating what mattered or writing it to a file (which the WORKSPACE
 // list then carries as "I have this"), and what she does not keep simply rests
 // in the record until recalled.
-export function projectMemory(units, attention = {}, shelved = []) {
+export function projectMemory(units, attention = {}) {
   const memories = units.filter((unit) => unit.kind === "memory");
   const actions = units.filter((unit) => unit.kind !== "memory");
-  const recent = actions.slice(-RECENT_WINDOW);
-  const folders = Array.isArray(shelved) ? shelved.filter(Boolean) : [];
+  const recent = actions;
 
   const hasLedger = Number.isFinite(Number(attention.maintained))
     && Number.isFinite(Number(attention.capacity));
@@ -449,7 +456,7 @@ export function projectMemory(units, attention = {}, shelved = []) {
     maintained,
     capacity,
     shown: recent.length + memories.length,
-    hidden: Math.max(0, actions.length - recent.length),
+    hidden: 0,
     lines: [
       ...(hasLedger ? [
         `maintained: ${maintained.toLocaleString("en-US")} tokens`,
@@ -460,10 +467,6 @@ export function projectMemory(units, attention = {}, shelved = []) {
       ] : []),
       ...memories.flatMap(narrativeBlock),
       ...recent.flatMap(recentBlock),
-      // The archive index: each folder she shelved memories under, by name.
-      // The full memories receded; these labels are how she reaches them back
-      // with recall(). Their presence is what makes shelve not a forget.
-      ...(folders.length ? ["", "SHELVED — recall by name", ...folders.map((l) => `  · ${l}`)] : []),
     ],
   };
 }

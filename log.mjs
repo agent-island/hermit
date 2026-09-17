@@ -250,11 +250,17 @@ export class Log {
   }
 
   shelvedIds() {
-    const ids = new Set();
-    for (const row of this.recent("shelf", 1_000_000)) {
+    // A unit's current shelf state is its most recent shelf/unshelf event, so
+    // restore() genuinely returns it to the present rather than leaving a stale
+    // "shelved" marker behind. Folded in id order across both event kinds.
+    const events = [...this.recent(["shelf", "unshelf"], 1_000_000)].sort((a, b) => a.id - b.id);
+    const on = new Map();
+    for (const row of events) {
       const target = Number(row.meta?.target);
-      if (Number.isInteger(target) && target > 0) ids.add(target);
+      if (Number.isInteger(target) && target > 0) on.set(target, row.kind === "shelf");
     }
+    const ids = new Set();
+    for (const [id, isOn] of on) if (isOn) ids.add(id);
     return ids;
   }
 
@@ -313,7 +319,6 @@ export class Log {
     return this.units().filter((row) =>
       row.kind === "memory"
       && row.state === "active"
-      && row.meta?.mental !== "identity"
       && !standing.has(row.id))
       .map((row) => this.withResolution(row, resolved));
   }
@@ -329,7 +334,7 @@ export class Log {
     const resolved = this.resolvedIds();
     return this.units().filter((row) =>
       row.state === "active" && !standing.has(row.id) && (
-        (row.kind === "memory" && row.meta?.mental !== "identity") ||
+        row.kind === "memory" ||
         (row.kind === "action" && row.result && !isMemoryTransition(row.meta?.name))
       ),
     ).map((row) => this.withResolution(row, resolved));
@@ -401,19 +406,51 @@ export class Log {
     });
   }
 
-  intend(text, success = "", cue = "") {
+  intend(text, success = "", cue = "", under = "", name = "") {
     const goal = String(text || "").trim();
     if (!goal) return { note: "intend needs the goal as text" };
     const doneWhen = String(success || "").trim();
     const when = String(cue || "").trim();
+    const handle = String(name || "").trim().replace(/\s+/g, " ").slice(0, 80);
+    // A sub-goal names the standing goal it serves. The parent resolves the same
+    // way progress/resolve do — by its name first, then by its wording — so a
+    // child can be opened under a parent the being can see and reference by the
+    // handle shown in the room. An unknown parent is not an error: the goal
+    // still stands on its own, just without the link.
+    const parentQuery = String(under || "").trim().toLocaleLowerCase().replace(/\s+/g, " ");
+    const parent = parentQuery
+      ? (this.activeIntentions().find((row) =>
+          String(row.meta?.name || "").toLocaleLowerCase().replace(/\s+/g, " ") === parentQuery)
+        || this.activeIntentions().find((row) =>
+          String(row.content || "").toLocaleLowerCase().includes(parentQuery)))
+      : null;
+    const parentRef = parent ? (parent.meta?.name || parent.content) : null;
+    const sameGoal = goal.toLocaleLowerCase().replace(/\s+/g, " ");
+    const existing = this.activeIntentions().find((row) =>
+      String(row.content || "").trim().toLocaleLowerCase().replace(/\s+/g, " ") === sameGoal
+      || (handle && String(row.meta?.name || "").toLocaleLowerCase().replace(/\s+/g, " ") === handle.toLocaleLowerCase()));
+    if (existing) {
+      return {
+        intention: existing.content,
+        ...(existing.meta?.name ? { name: existing.meta.name } : {}),
+        ...(existing.meta?.success ? { success: existing.meta.success } : {}),
+        ...(existing.meta?.cue ? { cue: existing.meta.cue } : {}),
+        ...(existing.meta?.under ? { under: existing.meta.under } : {}),
+        alreadyStanding: true,
+      };
+    }
     this.append("memory", goal, {
       mental: "intention", intention: true, authored: true,
       success: doneWhen, cue: when,
+      ...(handle ? { name: handle } : {}),
+      ...(parentRef ? { under: parentRef } : {}),
     });
     return {
       intention: goal,
+      ...(handle ? { name: handle } : {}),
       ...(doneWhen ? { success: doneWhen } : {}),
       ...(when ? { cue: when } : {}),
+      ...(parentRef ? { under: parentRef } : {}),
     };
   }
 
@@ -433,16 +470,34 @@ export class Log {
     return { identity };
   }
 
-  remember(kind, text, cue = "") {
+  remember(kind, name, text) {
     const mental = String(kind || "").trim().toLocaleLowerCase().replace(/\s+/g, " ").slice(0, 40);
+    const handle = String(name || "").trim().replace(/\s+/g, " ").slice(0, 80);
     const content = String(text || "").trim();
     if (!mental) return { note: "remember needs a kind" };
     if (!content) return { note: "remember needs text" };
-    if (mental === "identity") return this.identify(content);
-    const when = String(cue || "").trim();
-    if (mental === "intention") return this.intend(content, "", when);
-    this.append("memory", content, { mental, authored: true, cue: when });
-    return { kind: mental, memory: content, ...(when ? { cue: when } : {}) };
+    // The name is the handle every later act reaches for — shelve, restore,
+    // revise, forget all resolve it exactly. A memory may be made without one;
+    // it is still present (nothing evicts), only not addressable until named.
+    if (mental === "intention") return this.intend(content, "", "");
+    this.append("memory", content, { mental, authored: true, name: handle });
+    return { kind: mental, memory: content, ...(handle ? { name: handle } : {}) };
+  }
+
+  // Return shelved units to the present. Ids the caller already resolved from a
+  // name; only those currently shelved actually move, and a forgotten unit is
+  // never resurrected. Returns the ids that came back.
+  restore(ids) {
+    const list = Array.isArray(ids) ? ids : [ids];
+    const shelved = this.shelvedIds();
+    const restored = [];
+    for (const id of list) {
+      const target = Number(id);
+      if (!Number.isInteger(target) || !shelved.has(target)) continue;
+      this.append("unshelf", `unit #${target}`, { target });
+      restored.push(target);
+    }
+    return restored;
   }
 
   revisableMemories(query) {
@@ -489,8 +544,15 @@ export class Log {
     const standing = this.activeIntentions()
       .filter((row) => !(world && row.id > world.id));
     if (!standing.length) return { note: "there are no standing intentions" };
-    const needle = raw.toLocaleLowerCase();
-    const target = standing.find((row) => String(row.content).toLocaleLowerCase().includes(needle));
+    // Name first, exactly — the handle shown in the room, so a goal answers to
+    // the short word the being reads back rather than to a re-typed sentence
+    // that has to be a substring. Then fall back to the goal's own wording, so
+    // an unnamed goal still answers to its text.
+    const needle = raw.toLocaleLowerCase().replace(/\s+/g, " ");
+    const byName = standing.find((row) =>
+      String(row.meta?.name || "").toLocaleLowerCase().replace(/\s+/g, " ") === needle);
+    if (byName) return byName;
+    const target = standing.find((row) => String(row.content).toLocaleLowerCase().includes(raw.toLocaleLowerCase()));
     return target || { note: `no standing intention matches ${JSON.stringify(raw)}` };
   }
 
@@ -546,9 +608,49 @@ export class Log {
     const world = this.last("world");
     if (!world) return [];
     const units = this.units().filter((row) => row.kind === "action" && row.id > world.id);
+    // The being's own expression returns nothing to read back — its words and
+    // feelings already sit in LAST. Echoing "spoke aloud to one (468 characters)"
+    // into RETURNED is a receipt no mind issues itself, so a successful act of
+    // speech, inner speech, or feeling carries no returned line. A speak that
+    // failed to reach the other is kept, so a lost message is never silent.
+    const SELF_EXPRESSION = new Set(["speak_aloud", "speak", "inner_speech", "think", "feel"]);
     return units
       .filter((row) => row.state === "active" && row.result)
-      .map((row) => ({ id: row.id, call: row.content, value: modelResultContent(row) }));
+      .filter((row) => !(SELF_EXPRESSION.has(row.meta?.name)
+        && !["failed", "unknown"].includes(row.result?.meta?.value?.status)))
+      .map((row) => ({
+        id: row.id,
+        call: row.content,
+        value: modelResultContent(row),
+        known: row.result?.meta?.value?.status !== "unknown",
+      }));
+  }
+
+  // An action row is written before its effect begins. If the process stops
+  // before the matching result row is durable, replay cannot know whether the
+  // external effect happened. On the next start, close that half-written pair
+  // with an explicit unknown outcome. This prevents both dangerous guesses:
+  // neither "it completed" nor "it never ran" is asserted.
+  resolveInterruptedActions() {
+    const pending = this.units().filter((row) => row.kind === "action" && !row.result);
+    const resolved = [];
+    for (const action of pending) {
+      const value = {
+        status: "unknown",
+        reason: "the runtime stopped before recording whether this action completed",
+      };
+      const fact = actionFact(action.meta, { value });
+      const result = this.append("result", `status: unknown\nreason: ${value.reason}`, {
+        name: action.meta?.name || "action",
+        action: action.id,
+        value,
+        yielded: null,
+        fact,
+        interrupted: true,
+      });
+      resolved.push({ action: action.id, result: result.id });
+    }
+    return resolved;
   }
 
   // Lines from the most recent moment that were written in the shape of a call
@@ -601,19 +703,21 @@ export class Log {
     return done;
   }
 
-  // The names memories have been shelved under, each still holding at least one
-  // memory not since forgotten. These are the folder labels she reaches back for
-  // with recall(); without them a shelved memory is lost as surely as a
-  // forgotten one — the reference is what separates shelve from forget. Only
-  // labels from her explicit shelve() appear; a consolidation leaves its summary
-  // as the reference instead, so its auto-shelved detail carries no label here.
+  // The names memories are currently shelved under, each still holding at least
+  // one memory that is shelved now (not since restored) and not forgotten.
+  // These are the names she reaches back for with restore(); without them a
+  // shelved memory is lost as surely as a forgotten one — the reference is what
+  // separates shelve from forget. Only labels from her explicit shelve() appear;
+  // a consolidation leaves its summary as the reference for its folded detail.
   shelfLabels() {
+    const shelved = this.shelvedIds();
     const forgotten = this.forgottenIds();
     const seen = new Set();
     const labels = [];
     for (const row of this.recent("shelf", 1_000_000)) {
+      const target = Number(row.meta?.target);
       const label = row.meta?.label;
-      if (!label || forgotten.has(Number(row.meta?.target)) || seen.has(label)) continue;
+      if (!label || !shelved.has(target) || forgotten.has(target) || seen.has(label)) continue;
       seen.add(label);
       labels.push(label);
     }
@@ -622,9 +726,10 @@ export class Log {
 
   // One transaction creates the authored memory and shelves every active
   // source. Either the whole change enters her life or none of it does.
-  consolidate(ids, text) {
+  consolidate(ids, text, name = "") {
     if (!Array.isArray(ids) || !ids.length) return { note: "consolidate takes a non-empty array of unit numbers" };
     const content = String(text || "").trim();
+    const handle = String(name || "").trim().replace(/\s+/g, " ").slice(0, 80);
     if (!content) return { note: "consolidate needs the long-term memory as text" };
     // Tolerant: keep the numbers that are real memory units and were available
     // this moment, and skip the rest instead of throwing the whole thing away.
@@ -649,15 +754,17 @@ export class Log {
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const memory = this.append("memory", content, { mental: "memory", authored: true, sources });
+      const memory = this.append("memory", content, { mental: "memory", authored: true, name: handle, sources });
       const shelved = [];
       for (const unit of units) {
         if (unit.state === "shelved") continue;
-        this.append("shelf", `unit #${unit.id}`, { target: unit.id, by: memory.id });
+        // The folded sources recede under the consolidation's own name, so
+        // restore(name) can later bring the raw detail back beneath its summary.
+        this.append("shelf", `unit #${unit.id}`, { target: unit.id, by: memory.id, ...(handle ? { label: handle } : {}) });
         shelved.push(unit.id);
       }
       this.db.exec("COMMIT");
-      return { memory: memory.id, sources, shelved, state: "active", ...(skipped.length ? { skipped } : {}) };
+      return { memory: memory.id, sources, shelved, state: "active", ...(handle ? { name: handle } : {}), ...(skipped.length ? { skipped } : {}) };
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -786,6 +893,7 @@ export class Log {
     if (!(upToId > (answered[who] ?? 0))) return answered;
     answered[who] = upToId;
     this.set("answered_v1", answered);
+    this.append("answered", String(who), { from: String(who), upToId: Number(upToId) });
     return answered;
   }
 
@@ -883,7 +991,7 @@ export class Log {
   // and whether anything has been said to her since.
   lastSpoke() {
     const row = this.db
-      .prepare("SELECT * FROM events WHERE kind = 'action' AND (meta LIKE '%\"name\":\"speak\"%' OR meta LIKE '%\"name\":\"think\"%' OR meta LIKE '%\"name\":\"speak_aloud\"%') ORDER BY id DESC LIMIT 1")
+      .prepare("SELECT * FROM events WHERE kind = 'action' AND (meta LIKE '%\"name\":\"speak\"%' OR meta LIKE '%\"name\":\"think\"%' OR meta LIKE '%\"name\":\"inner_speech\"%' OR meta LIKE '%\"name\":\"speak_aloud\"%') ORDER BY id DESC LIMIT 1")
       .get();
     if (!row) return null;
     const answered = this.db
@@ -912,13 +1020,19 @@ export class Log {
 function modelResultContent(unit) {
   const recorded = unit?.result?.meta?.value;
   const raw = recorded && typeof recorded === "object" ? recorded : {};
+  if (raw.status === "unknown") {
+    return formatModelResult({
+      status: "unknown",
+      reason: raw.reason || "the runtime stopped before recording whether this action completed",
+    });
+  }
   const didFail = unit?.result?.meta?.yielded === false || unit?.result?.meta?.error || raw.status === "failed" || raw.note;
   const reason = String(raw.reason || raw.note || unit?.result?.meta?.error || unit?.result?.content || "the action did not complete");
   if (didFail) return formatModelResult({ status: "failed", reason });
 
   const name = String(unit?.meta?.name || unit?.result?.meta?.name || "");
   const args = Array.isArray(unit?.meta?.args) ? unit.meta.args : [];
-  if (["speak", "think", "speak_aloud"].includes(name)) {
+  if (["speak", "think", "inner_speech", "speak_aloud"].includes(name)) {
     return formatModelResult({
       status: "success",
       characters: Number(raw.characters) || String(args[0] || raw.spoken || "").trim().length,

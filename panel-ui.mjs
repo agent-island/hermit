@@ -1,6 +1,6 @@
 // The observer is one compact instrument. The record remains the large surface;
 // live context stays visible beside it, while editing and endings have their own
-// views so they cannot compete with reading a moment.
+// views so they cannot compete with reading a continuation.
 import { LOG_CSS } from "./plain.mjs";
 
 export function renderPage({
@@ -8,6 +8,7 @@ export function renderPage({
   eventTotal = 0,
   state,
   setup,
+  scaffold = "",
   model,
   arrival,
   mind = {},
@@ -15,31 +16,41 @@ export function renderPage({
   world = "",
   runtime = {},
   voice = {},
+  fullResetRequired = false,
 }) {
   const status = state.awake
-    ? "in a moment"
+    ? "continuing"
     : state.paused
       ? "paused"
       : state.next
-        ? `between moments · next ${clock(state.next)}`
-        : "between moments";
+        ? `waiting · next ${clock(state.next)}`
+        : "waiting";
   const stateAction = state.paused
     ? '<button class="control" data-post="/resume">Resume</button>'
     : '<button class="control" data-post="/pause">Pause</button>';
   const voiceName = voice.enabled ? shortVoice(voice.name) : "voice off";
   const age = lifeAge(runtime.born);
   const attention = attentionFacts(world);
+  const newLifeControl = fullResetRequired
+    ? `<div class="action-row divided">
+                <div><b>Begin a new paired life</b><p class="dim">A paired life requires a complete VM rebuild. Run <code>./restart-new-lives.sh</code> from the two-agents directory.</p></div>
+                <span class="control disabled" aria-disabled="true">Full-machine launcher only</span>
+              </div>`
+    : `<div class="action-row divided">
+                <div><b>Begin a new life</b><p class="dim">Clear the record and workspace, then start.</p></div>
+                <button class="control danger" data-post="/reset" data-confirm="Archive this life and begin a new one?">Archive and begin</button>
+              </div>`;
 
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Project AA</title><style>${LOG_CSS}${PANEL_CSS}</style></head>
+<title>Hermit</title><style>${LOG_CSS}${PANEL_CSS}</style></head>
 <body>
 <header class="topbar">
-  <div class="identity"><b>Project AA</b><span class="live ${state.awake ? "awake" : ""}"></span><span class="status">${escape(status)}</span></div>
+  <div class="identity"><b>Hermit</b><span class="live ${state.awake ? "awake" : ""}"></span><span class="status">${escape(status)}</span></div>
   <nav aria-label="Observer sections">
     <button class="tab active" type="button" data-tab="record" aria-selected="true">Record</button>
-    <button class="tab" type="button" data-tab="room" aria-selected="false">Room</button>
+    <button class="tab" type="button" data-tab="scaffold" aria-selected="false">Scaffold</button>
     <button class="tab" type="button" data-tab="lives" aria-selected="false">Lives</button>
   </nav>
   <div class="top-actions">
@@ -54,10 +65,11 @@ export function renderPage({
   <div class="main-surface">
     <section class="view active" id="view-record">
       <div class="view-tools">
-        <b>${log.total} moments</b>
+        <b>${log.total} continuations</b>
         <span class="dim">· ${Number(eventTotal).toLocaleString()} events · newest first · showing ${log.shown || 0} · complete actions and results</span>
         <span class="grow"></span>
         <button class="new-activity" id="new-activity" type="button" role="status" hidden>New activity · show</button>
+        <button class="control" id="record-width" type="button" aria-pressed="true">Show context</button>
         <div class="mode-switch" aria-label="Record detail">
           <button class="mode active" type="button" data-mode="readable" aria-pressed="true">Readable</button>
           <button class="mode" type="button" data-mode="exact" aria-pressed="false">Exact</button>
@@ -66,33 +78,33 @@ export function renderPage({
       <main class="record">${log.html}</main>
     </section>
 
-    <section class="view" id="view-room" hidden>
-      <div class="view-tools"><b>Room</b><span class="dim">· changes land next moment</span></div>
+    <section class="view" id="view-scaffold" hidden>
+      <div class="view-tools"><b>Scaffold</b><span class="dim">· exact model-facing structure</span></div>
       <main class="compact-page two-columns">
         <div>
           <section class="panel-section">
-            <header><b>Authored room</b><span class="dim"> · editable</span></header>
+            <header><b>Complete scaffold</b><span class="dim"> · current faculties expanded</span></header>
             <div class="panel-body">
-              <label for="arrival">How the document arrives</label>
-              <select id="arrival">
-                ${["prefix", "completions"]
-                  .map((key) => `<option value="${key}"${key === setup.arrival ? " selected" : ""}>${ARRIVAL[key]}</option>`)
-                  .join("")}
-              </select>
-              <label for="template">Template</label>
+              <textarea id="scaffold-document" class="scaffold-document" spellcheck="false" rows="34" readonly>${escape(scaffold || setup.template)}</textarea>
+            </div>
+          </section>
+
+          <section class="panel-section">
+            <header><b>Structure</b><span class="dim"> · editable; faculties expand at runtime</span></header>
+            <div class="panel-body">
               <textarea id="template" spellcheck="false" rows="18">${escape(setup.template)}</textarea>
               <div class="actions">
-                <button class="control primary" id="save-room" type="button">Save room</button>
-                <span id="room-result" class="dim"></span>
+                <button class="control primary" id="save-scaffold" type="button">Save structure</button>
+                <span id="scaffold-result" class="dim"></span>
               </div>
             </div>
           </section>
 
           <section class="panel-section">
-            <header><b>Last assembled world</b><span class="dim"> · exact</span></header>
+            <header><b>Last state sent to the model</b><span class="dim"> · exact</span></header>
             <details class="world-document">
-              <summary>${world ? "Complete document · expand" : "No moment yet"}</summary>
-              <pre>${escape(world || "The first world has not been assembled.")}</pre>
+              <summary>${world ? "Complete state · expand" : "No continuation yet"}</summary>
+              <pre>${escape(world || "No state has been assembled.")}</pre>
             </details>
           </section>
         </div>
@@ -101,6 +113,12 @@ export function renderPage({
           <section class="panel-section">
             <header><b>Mind</b><span class="dim"> · machine-local; she never sees this</span></header>
             <div class="panel-body">
+              <label for="arrival">Arrival</label>
+              <select id="arrival">
+                ${["prefix", "completions"]
+                  .map((key) => `<option value="${key}"${key === setup.arrival ? " selected" : ""}>${ARRIVAL[key]}</option>`)
+                  .join("")}
+              </select>
               <label for="base-url">Endpoint</label>
               <input id="base-url" class="control-field" value="${escape(mind.baseUrl || "")}" placeholder="https://openrouter.ai/api/v1" autocomplete="off">
               <label for="api-key">Key ${mind.apiKeySet ? `<span class="dim">· saved ${escape(mind.apiKeyHint)} · ${escape(mind.source)}</span>` : '<span class="dim">· none saved</span>'}</label>
@@ -133,7 +151,7 @@ export function renderPage({
     <section class="view" id="view-lives" hidden>
       <div class="view-tools"><b>Lives</b><span class="dim">· preservation and irreversible changes</span></div>
       <div class="life-summary">
-        <b>Current · ${escape(age)}</b><span>${log.total} moments</span><span>${Number(eventTotal).toLocaleString()} events</span>
+        <b>Current · ${escape(age)}</b><span>${log.total} continuations</span><span>${Number(eventTotal).toLocaleString()} events</span>
         <span class="grow"></span>
         <a class="control" href="/life.html">Life HTML</a>
         <a class="control" href="/life.md" target="_blank">Markdown</a>
@@ -160,10 +178,7 @@ export function renderPage({
                 <div><b>End this life</b><p class="dim">Stop permanently and keep it readable.</p></div>
                 <button class="control danger" data-post="/end" data-confirm="End this life? She stops permanently.">End</button>
               </div>
-              <div class="action-row divided">
-                <div><b>Begin a new life</b><p class="dim">Clear the record and workspace, then start.</p></div>
-                <button class="control danger" data-post="/reset" data-confirm="Archive this life and begin a new one?">Archive and begin</button>
-              </div>
+              ${newLifeControl}
             </div>
           </section>
         </div>
@@ -175,13 +190,13 @@ export function renderPage({
     <section class="rail-section">
       <b>Speak into the room</b>
       <form id="say" class="say">
-        <input name="text" placeholder="She sees this next moment" autocomplete="off">
+        <input name="text" placeholder="She sees this next continuation" autocomplete="off">
         <button class="control primary">Say</button>
       </form>
     </section>
 
     <section class="rail-section">
-      <div class="rail-title"><b>Now</b><span class="${state.paused ? "dim" : "good"}">${state.paused ? "paused" : state.awake ? "in a moment" : "running"}</span></div>
+      <div class="rail-title"><b>Now</b><span class="${state.paused ? "dim" : "good"}">${state.paused ? "paused" : state.awake ? "continuing" : "running"}</span></div>
       <dl class="facts">
         <div><dt>Next</dt><dd>${state.next ? `${clock(state.next)} · ${until(state.next)}` : state.paused ? "held" : "none"}</dd></div>
         <div><dt>Voice</dt><dd id="voice-state">${escape(voiceName)}${voice.speaking ? " · speaking" : voice.queued ? ` · ${voice.queued} queued` : ""}</dd></div>
@@ -190,9 +205,9 @@ export function renderPage({
     </section>
 
     <section class="rail-section">
-      <div class="rail-title"><b>World</b><button class="text-link" type="button" data-go="room">edit</button></div>
+      <div class="rail-title"><b>Scaffold</b><button class="text-link" type="button" data-go="scaffold">audit</button></div>
       <dl class="facts">
-        <div><dt>Room</dt><dd>${setup.template ? "custom" : "default"}${world ? ` · ${world.length.toLocaleString()} chars` : ""}</dd></div>
+        <div><dt>State</dt><dd>${world ? `${world.length.toLocaleString()} characters` : "not assembled"}</dd></div>
         <div><dt>${runtime.machine ? "Machine" : "Workspace"}</dt><dd>${runtime.machine ? `workstation · ${Number(runtime.files) || 0} in ~` : `${Number(runtime.files) || 0} files`}</dd></div>
         <div><dt>Actions</dt><dd>${Number(runtime.affordances) || 0}</dd></div>
         <div><dt>Attention</dt><dd>${attention ? `${escape(attention.maintained)} maintained · ${escape(attention.remains)} remains` : "not recorded"}</dd></div>
@@ -203,7 +218,7 @@ export function renderPage({
       <div class="rail-title"><b>Life</b><button class="text-link" type="button" data-go="lives">manage</button></div>
       <dl class="facts">
         <div><dt>Age</dt><dd>${escape(age)}</dd></div>
-        <div><dt>Record</dt><dd>${log.total} moments · ${Number(eventTotal).toLocaleString()} events</dd></div>
+        <div><dt>Record</dt><dd>${log.total} continuations · ${Number(eventTotal).toLocaleString()} events</dd></div>
       </dl>
       <div class="rail-actions">
         <button class="control" data-post="/save">Save copy</button>
@@ -217,7 +232,16 @@ export function renderPage({
 const views = [...document.querySelectorAll(".view")];
 const tabs = [...document.querySelectorAll("[data-tab]")];
 const newActivity = document.getElementById("new-activity");
+const recordWidth = document.getElementById("record-width");
 let seenEventTotal = ${Number(eventTotal) || 0};
+let wideRecord = sessionStorage.getItem("ami-record-width") !== "compact";
+
+function applyRecordWidth() {
+  const recordActive = !document.getElementById("view-record").hidden;
+  document.body.classList.toggle("record-focus", recordActive && wideRecord);
+  recordWidth.setAttribute("aria-pressed", String(wideRecord));
+  recordWidth.textContent = wideRecord ? "Show context" : "Widen messages";
+}
 
 function showView(name) {
   for (const view of views) {
@@ -231,10 +255,12 @@ function showView(name) {
     tab.setAttribute("aria-selected", String(active));
   }
   sessionStorage.setItem("ami-view", name);
+  applyRecordWidth();
 }
 for (const tab of tabs) tab.onclick = () => showView(tab.dataset.tab);
 for (const link of document.querySelectorAll("[data-go]")) link.onclick = () => showView(link.dataset.go);
-showView(sessionStorage.getItem("ami-view") || "record");
+const storedView = sessionStorage.getItem("ami-view");
+showView(storedView === "room" ? "scaffold" : storedView || "record");
 
 function showMode(name) {
   document.body.classList.toggle("exact-mode", name === "exact");
@@ -247,6 +273,12 @@ function showMode(name) {
 }
 for (const mode of document.querySelectorAll("[data-mode]")) mode.onclick = () => showMode(mode.dataset.mode);
 showMode(sessionStorage.getItem("ami-mode") || "readable");
+
+recordWidth.onclick = () => {
+  wideRecord = !wideRecord;
+  sessionStorage.setItem("ami-record-width", wideRecord ? "wide" : "compact");
+  applyRecordWidth();
+};
 
 document.getElementById("say").onsubmit = async (event) => {
   event.preventDefault();
@@ -318,8 +350,8 @@ document.getElementById("save-model").onclick = async () => {
   location.reload();
 };
 
-document.getElementById("save-room").onclick = async () => {
-  const out = document.getElementById("room-result");
+document.getElementById("save-scaffold").onclick = async () => {
+  const out = document.getElementById("scaffold-result");
   await fetch("/setup", { method: "POST", body: JSON.stringify({
     template: document.getElementById("template").value,
     arrival: document.getElementById("arrival").value,
@@ -353,16 +385,16 @@ fetch("/letters").then((response) => response.json()).then((data) => {
 fetch("/points").then((response) => response.json()).then((data) => {
   const rows = (data.points || []).slice(0, 20);
   document.getElementById("points").innerHTML = rows.length
-    ? '<table><thead><tr><th>Moment</th><th>First line</th><th>Actions</th><th></th></tr></thead><tbody>'
+    ? '<table><thead><tr><th>Continuation</th><th>First line</th><th>Actions</th><th></th></tr></thead><tbody>'
       + rows.map((one, index) => '<tr><td>' + escapeHtml(String(rows.length - index)) + " · " + escapeHtml(stamp(one.at))
         + '</td><td>' + escapeHtml(one.line || "nothing emitted") + '</td><td>'
         + escapeHtml((one.calls || []).join(" · ") || "none") + '</td><td><button class="control rewind" data-id="'
         + Number(one.id) + '">Rewind</button></td></tr>').join("")
       + "</tbody></table>"
-    : "No moments yet.";
+    : "No continuations yet.";
   for (const button of document.querySelectorAll(".rewind")) {
     button.onclick = async () => {
-      if (!confirm("Keep a copy, remove everything after this moment, rebuild the workspace, and run it again?")) return;
+      if (!confirm("Keep a copy, remove everything after this continuation, rebuild the workspace, and run it again?")) return;
       button.disabled = true;
       await fetch("/rewind", { method: "POST", body: JSON.stringify({ toId: Number(button.dataset.id) }) });
       sessionStorage.setItem("ami-view", "record");
@@ -424,6 +456,7 @@ nav{align-self:stretch;gap:23px}.tab{height:48px;border:0;border-bottom:2px soli
 .control:hover{background:var(--alt)}.control.primary{background:var(--fg);color:var(--chrome);border-color:var(--fg)}
 .control:disabled{opacity:.5}.voice-control.on::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--live)}
 .observer{display:grid;grid-template-columns:minmax(0,1fr) 292px;min-height:calc(100vh - 48px)}
+.record-focus .observer{grid-template-columns:minmax(0,1fr)}.record-focus .context-rail{display:none}
 .main-surface{min-width:0;border-right:1px solid var(--line)}.view[hidden]{display:none}
 .view-tools{min-height:39px;padding:0 12px;gap:7px;background:var(--chrome);border-bottom:1px solid var(--line);
   position:sticky;top:48px;z-index:4}.grow{flex:1}.new-activity{border:0;background:transparent;
@@ -435,7 +468,10 @@ nav{align-self:stretch;gap:23px}.tab{height:48px;border:0;border-bottom:2px soli
 .moment-number{width:70px}.moment-title{padding:0 10px}.moment-meta{padding:0 10px}
 .event-row{grid-template-columns:70px 84px minmax(0,1fr) 210px;min-height:36px}
 .event-time,.event-kind,.event-content,.event-result{padding:7px 8px}.event-time,.event-kind{white-space:nowrap}
-.thought-text{max-width:76ch;margin-top:5px;font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.message-row .event-content{padding:9px 10px 11px}
+.thought summary{min-height:34px;padding:4px 0}
+.thought-text,.memory-text{max-width:92ch;margin:7px 0 2px 0;font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.reasoning-text{max-width:100ch;margin:7px 0 2px 0;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}
 .latest-mark{margin-right:8px}.context-rail{background:var(--chrome)}
 .rail-section{padding:11px 12px;border-bottom:1px solid var(--line)}.rail-title{justify-content:space-between;gap:8px;margin-bottom:7px}
 .say{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;margin-top:7px}.say input,
@@ -453,6 +489,7 @@ select,textarea,.control-field{width:100%;min-width:0;border:1px solid var(--lin
 .panel-body{padding:9px 10px}.panel-body label{display:block;margin:8px 0 4px;color:var(--dim);font-size:12px}
 .panel-body label:first-child{margin-top:0}.field-pair{display:grid;grid-template-columns:1fr 1fr;gap:7px}
 textarea{resize:vertical;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.scaffold-document{min-height:560px;resize:vertical;background:var(--chrome)}
 .actions{gap:6px;margin-top:8px;flex-wrap:wrap}.people-note{margin:0 0 7px}
 .world-document{padding:8px 10px}.world-document summary{cursor:pointer;color:var(--dim)}
 .world-document pre{max-height:420px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;

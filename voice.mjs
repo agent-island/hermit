@@ -13,7 +13,7 @@
 // persona or a set of orders. Its order implements a small temporal structure:
 // stable faculties and latent continuity first; the present situation next;
 // the immediately retained result and prior words last. A continuation therefore
-// begins beside what just happened, while identity remains empty until authored.
+// begins beside what just happened, without a framework-authored self-description.
 //
 // XML tags are boundaries only. They prevent a command result, a memory and an
 // intention from becoming an ambiguous wall of prose; they do not assign a role
@@ -24,21 +24,17 @@ export const ROOM = `<state>
     {{intentions}}
   </intentions>
 
-  <foreground_memory>
+  <memory>
     {{memories}}
-  </foreground_memory>
+  </memory>
 
-  <latent_memory>
-    {{latent}}
-  </latent_memory>
+  <shelved>
+    {{shelved}}
+  </shelved>
 
-  <identity>
-    {{identity}}
-  </identity>
 </continuity>
 
 <faculties>
-  a line name(arguments) is an act; its arguments are JSON.
   more than one act can occur in the same continuation.
   {{forms}}
 </faculties>
@@ -69,30 +65,35 @@ export const VOICE = {
   // The ACTIONS list she reads every moment: each form, and what it does.
   // Which appear, and in what order, is decided in body.affordances().
   actions: {
-    think:       { form: "think(text)",                does: "think" },
-    identify:    { form: "identify(text)",             does: "identity" },
-    speak_aloud: { form: "speak_aloud(text)",          does: "speak aloud" },
-    feel:        { form: "feel(emotion, intensity)",   does: "a feeling attached to the words of this moment, its intensity a number from 0 to 1" },
-    search:      { form: "search(query)",              does: "searches the internet, returns results and page text" },
-    open:        { form: "open(url)",                  does: "downloads one web page, returns a source number and its first page" },
-    read_source: { form: "read_source(number, page)",  does: "returns one page of a fetched source; page 0 is the first, and each next page is one higher" },
-    run:         { form: "run(command)",               does: "runs a command on the machine, returns its output" },
-    remember:    { form: "remember(kind, text, cue)",  does: "a memory of the named kind; an optional cue can bring it into foreground" },
-    recall:      { form: "recall(phrase)",             does: "returns memory units whose content matches the phrase, including shelved ones" },
-    revise:      { form: "revise(memory, text)",       does: "revision of a matching memory" },
-    shelve:      { form: "shelve(phrase)",             does: "lets every active memory matching the phrase recede from following context; the phrase becomes their name in the SHELVED list, and recall returns them by it" },
-    consolidate: { form: "consolidate(text)",          does: "folds active experiences and completed acts not already held in a lasting memory into one lasting memory in the words given; the folded originals recede, still recallable" },
-    intend:      { form: "intend(goal, success, cue)", does: "a standing intention with a success condition and an optional retrieval cue" },
-    progress:    { form: "progress(intention, evidence, next, cue)", does: "evidence and the current next step of a standing intention" },
-    resolve:     { form: "resolve(intention, outcome, evidence)", does: "resolution" },
-    draw:        { form: "draw(n)",                    does: "moves n moments from the reserve into this life" },
-    sleep:       { form: "sleep()",                    does: "sets an explicit return after the configured rest" },
-    ls:          { form: "ls()",                       does: "lists the files that are here" },
-    read:        { form: "read(path)",                 does: "returns the contents of one file" },
-    write:       { form: "write(path, text)",          does: "creates a file, or overwrites one with the same name" },
-    forget:      { form: "forget(query)",              does: "lets every memory matching the phrase go for good — they leave attention and can no longer be recalled; unlike shelve, this cannot be undone" },
-    email:       { form: "email(to, subject, text)",   does: "stores a local letter addressed to someone" },
-    end:         { form: "end()",                      does: "death" },
+    inner_speech:{ form: "inner_speech(text)", tagged: "<inner_speech>text</inner_speech>", does: "" },
+    // Historical names remain executable but are no longer presented as
+    // faculties. They preserve old lives without shaping a new continuation.
+    think:       { form: "think(text)", tagged: "<think>text</think>", does: "inner speech" },
+    identify:    { form: "identify(text)", tagged: "<identify>text</identify>", does: "identity" },
+    speak_aloud: { form: "speak_aloud(text)", tagged: "<speak_aloud>text</speak_aloud>", does: "" },
+    feel:        { form: "feel(emotion, intensity)", tagged: '<feel emotion="emotion" intensity="intensity"></feel>', does: "intensity is a number from 0 to 1" },
+    search:      { form: "search(query)", tagged: "<search>query</search>", does: "searches the internet, returns results and page text" },
+    open:        { form: "open(url)", tagged: "<open>url</open>", does: "downloads one web page, returns a source number and its first page" },
+    read_source: { form: "read_source(number, page)", tagged: '<read_source number="number" page="page"></read_source>', does: "returns one page of a fetched source; page 0 is the first, and each next page is one higher" },
+    run:         { form: "run(command)", tagged: "<run>command</run>", does: "returns output" },
+    remember:    { form: "remember(kind, name, text)", tagged: '<remember kind="kind" name="name">text</remember>', does: "keeps text as an active memory named name" },
+    restore:     { form: "restore(name)", tagged: "<restore>name</restore>", does: "returns a shelved memory to the present" },
+    recall:      { form: "recall(phrase)", tagged: "<recall>phrase</recall>", does: "includes shelved memories" },
+    revise:      { form: "revise(name, text)", tagged: '<revise name="name">text</revise>', does: "the earlier wording stays in the record" },
+    shelve:      { form: "shelve(name)", tagged: "<shelve>name</shelve>", does: "removes the named memory from the present; restore can return it" },
+    consolidate: { form: "consolidate(name, text)", tagged: '<consolidate name="name">text</consolidate>', does: "keeps text as a memory and shelves the active experience under name" },
+    intend:      { form: "intend(goal, success, cue, under, name)", tagged: '<intend name="name" success="success" cue="cue" under="under">goal</intend>', does: "keeps goal active under name until resolved; under names its parent intention" },
+    progress:    { form: "progress(intention, evidence, next, cue)", tagged: '<progress intention="intention" next="next" cue="cue">evidence</progress>', does: "" },
+    resolve:     { form: "resolve(intention, outcome, evidence)", tagged: '<resolve intention="intention" outcome="outcome">evidence</resolve>', does: "" },
+    draw:        { form: "draw(n)", tagged: "<draw>n</draw>", does: "adds n reserved moments to the remaining moments" },
+    continue:    { form: "continue()", tagged: "<continue/>", does: "carry on into the next moment" },
+    sleep:       { form: "sleep()", tagged: "<sleep/>", does: "sets an explicit return after the configured rest" },
+    ls:          { form: "ls()", tagged: "<ls/>", does: "lists the files that are here" },
+    read:        { form: "read(path)", tagged: "<read>path</read>", does: "returns the contents of one file" },
+    write:       { form: "write(path, text)", tagged: '<write path="path">text</write>', does: "creates or replaces the file at path with text" },
+    forget:      { form: "forget(name)", tagged: "<forget>name</forget>", does: "the memory cannot be restored or recalled" },
+    email:       { form: "email(to, subject, text)", tagged: '<email to="to" subject="subject">text</email>', does: "stores a local letter addressed to someone" },
+    end:         { form: "end()", tagged: "<end/>", does: "death" },
   },
 
   // What comes back when one of her acts cannot complete. Objective statements
@@ -100,14 +101,13 @@ export const VOICE = {
   // ("say it more precisely"), which address her and rank her below a speaker.
   // Each says what is, and stops there. A few take a value; those are functions.
   messages: {
-    thinkNeedsText:     "there was no text to think",
+    innerSpeechNeedsText:"there were no words of inner speech",
     identityNeedsText:  "there was no identity text",
     rememberNeedsKind:  "no kind was named for the memory",
     rememberNeedsText:  "there was no text for the memory",
-    reviseNeedsMemory:  "no words named a memory to revise",
+    reviseNeedsMemory:  "no name was given for the memory to revise",
     reviseNeedsText:    "there was no revised memory text",
-    reviseNoMatch:      (phrase) => `no durable memory matches "${phrase}"`,
-    reviseAmbiguous:    (phrase, options) => `"${phrase}" matches several durable memories:\n${options}`,
+    reviseNoMatch:      (name) => `no memory is named "${name}"`,
     speakAloudNeedsText:"there was no text to speak aloud",
     feelNeedsEmotion:   "no feeling was named",
     intendNeedsText:    "no goal was named to intend",
@@ -118,9 +118,10 @@ export const VOICE = {
     letterNeedsText:    "the letter had no text",
     noQuery:            "no query was given",
     notHttp:            "that is not an http address",
-    shelveNeedsPhrase:  "no words named a memory to let recede",
-    shelveNoMatch:      (phrase) => `nothing in memory matches "${phrase}"`,
-    shelveAmbiguous:    (phrase, options) => `"${phrase}" matches several memories:\n${options}`,
+    shelveNeedsName:    "no name was given for the memory to let recede",
+    shelveNoMatch:      (name) => `no present memory is named "${name}"`,
+    restoreNeedsName:   "no name was given for the memory to restore",
+    restoreNoMatch:     (name) => `no shelved memory is named "${name}"`,
     consolidateNeedsText:  "no text was given to keep as the memory",
     consolidateNothing:    "there is no working memory to fold",
     noMachine:          "there is no machine to run on",
@@ -128,8 +129,8 @@ export const VOICE = {
     noSuchFile:         "there is no file by that name",
     notAFile:           "that is a directory, not a file",
     nameTooLong:        "that name is too long to be a file",
-    forgetNeedsTerm:    "nothing was named to forget",
-    forgetNoMatch:      (phrase) => `nothing in memory matches "${phrase}"`,
+    forgetNeedsTerm:    "no name was given to forget",
+    forgetNoMatch:      (name) => `no memory is named "${name}"`,
     theActionDidNotComplete: "the action did not complete",
     noSuchForm:   (name) => `there is no form by that name: ${name}`,
     noSuchSource: (number) => `there is no source numbered ${number}`,

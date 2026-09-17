@@ -13,9 +13,9 @@ import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const FILE = process.env.AMI_MAIL_FILE || path.join(here, "link", "letters.json");
+const FILE = process.env.HERMIT_MAIL_FILE || path.join(here, "link", "letters.json");
 
-const KEEP = Number(process.env.AMI_MAIL_KEEP) || 2000;
+const KEEP = Number(process.env.HERMIT_MAIL_KEEP) || 2000;
 
 function load() {
   try {

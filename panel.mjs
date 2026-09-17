@@ -15,6 +15,7 @@ import { letters as allLetters, count as letterCount } from "./mail.mjs";
 import { configFromEnv } from "./mind.mjs";
 import { extensionSearch } from "./extension-search.mjs";
 import { loadRun, saveRun, DEFAULT_RUN } from "./run.mjs";
+import { expandScaffold } from "./world.mjs";
 
 const PRESENCE_TIMEOUT_MS = 20_000;
 const EXTENSION_BUILD = "0.2.0";
@@ -73,19 +74,22 @@ export function startPanel({
   audible = null,
   preserveLife = null,
 }) {
+  const fullResetRequired = ["1", "true", "yes", "on"].includes(
+    String(process.env.HERMIT_FULL_RESET_REQUIRED || "").trim().toLowerCase(),
+  );
   const preserve = preserveLife || ((reason) => archiveLife(log, {
-    archiveDir: process.env.AMI_ARCHIVE_DIR || path.join(HERE, "archive"),
+    archiveDir: process.env.HERMIT_ARCHIVE_DIR || path.join(HERE, "archive"),
     reason,
-    label: process.env.AMI_ARCHIVE_LABEL || "life",
+    label: process.env.HERMIT_ARCHIVE_LABEL || "life",
   }));
-  // When she lives in a machine (AMI_SHELL_SSH set) her files are there, not in
+  // When she lives in a machine (HERMIT_SHELL_SSH set) her files are there, not in
   // the empty local workspace. Count her home on the machine, refreshed in the
   // background so rendering stays synchronous and no request ever waits on ssh.
-  const shellHost = process.env.AMI_SHELL_SSH || "";
+  const shellHost = process.env.HERMIT_SHELL_SSH || "";
   let machineFiles = 0;
   if (shellHost) {
     const countHome = () => {
-      const remote = process.env.AMI_SHELL_EXEC
+      const remote = process.env.HERMIT_SHELL_EXEC
         || "export LIMA_HOME=$HOME/.lima; $HOME/lima/bin/limactl shell box timeout 20 bash -s";
       const p = spawn("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6", shellHost, remote],
         { stdio: ["pipe", "pipe", "ignore"] });
@@ -99,8 +103,9 @@ export function startPanel({
     countHome();
     setInterval(countHome, 10000).unref?.();
   }
-  const homePage = () =>
-    renderPage({
+  const homePage = () => {
+    const setup = loadSetup(log);
+    return renderPage({
       log: momentCards(log, 25),
       eventTotal: log.count(),
       state: {
@@ -108,9 +113,10 @@ export function startPanel({
         paused: !loop.running,
         next: loop.nextWakeAt,
       },
-      setup: loadSetup(log),
+      setup,
+      scaffold: expandScaffold(setup.template, body.affordances(), setup.format === "faculties"),
       model: config?.model ?? "unknown model",
-      arrival: loadSetup(log).arrival,
+      arrival: setup.arrival,
       mind: describeModel(config),
       world: log.last("world")?.content ?? "",
       runtime: {
@@ -121,7 +127,9 @@ export function startPanel({
       },
       letters: letterCount(),
       voice: audible?.state ?? { enabled: false, name: "off", speaking: false, queued: 0 },
+      fullResetRequired,
     });
+  };
   checkPage(homePage());
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, "http://localhost");
@@ -145,7 +153,7 @@ export function startPanel({
       }
       if (!extension || request.headers["x-ami-extension"] !== EXTENSION_BUILD) {
         response.writeHead(403, { ...cors, "content-type": "application/json" });
-        response.end(JSON.stringify({ ok: false, note: `reload Project AA extension v${EXTENSION_BUILD}` }));
+        response.end(JSON.stringify({ ok: false, note: `reload Hermit extension v${EXTENSION_BUILD}` }));
         return;
       }
       if (url.pathname === "/browser-search/session" && request.method === "GET") {
@@ -339,6 +347,14 @@ export function startPanel({
     // A new birth: the record and the workspace both go, the authored room
     // stays. Restart alone just stops and starts the loop.
     if (url.pathname === "/reset" && request.method === "POST") {
+      if (fullResetRequired) {
+        response.writeHead(409, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          ok: false,
+          error: "paired lives require ./restart-new-lives.sh so the entire VM is rebuilt",
+        }));
+        return;
+      }
       const nextRevision = Number(log.get("observer_revision", 0)) + 1;
       loop.quiesce();
       await loop.waitUntilIdle();
@@ -428,7 +444,7 @@ export function startPanel({
     }
 
     if (url.pathname === "/peer-say" && request.method === "POST") {
-      const expected = String(process.env.AMI_PEER_TOKEN || "");
+      const expected = String(process.env.HERMIT_PEER_TOKEN || "");
       const supplied = String(request.headers["x-ami-peer-token"] || "");
       if (!expected || supplied !== expected) {
         response.writeHead(403, { "content-type": "application/json" });
@@ -457,7 +473,7 @@ export function startPanel({
       }
       log.append("incoming", text, { from });
       loop.interrupt();
-      json(response, { ok: true, receivedBy: String(process.env.AMI_SELF_NAME || "the other living agent") });
+      json(response, { ok: true, receivedBy: String(process.env.HERMIT_SELF_NAME || "the other living agent") });
       return;
     }
 
@@ -474,10 +490,10 @@ export function startPanel({
     response.writeHead(404).end("not found");
   });
 
-  // Localhost by default. Set AMI_HOST=0.0.0.0 to expose the panel on the LAN
+  // Localhost by default. Set HERMIT_HOST=0.0.0.0 to expose the panel on the LAN
   // (reachable at this machine's router IP) — note this also exposes control,
   // not just viewing, to anyone on the network.
-  server.listen(port, process.env.AMI_HOST || "127.0.0.1");
+  server.listen(port, process.env.HERMIT_HOST || "127.0.0.1");
   return server;
 }
 

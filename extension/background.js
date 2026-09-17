@@ -1,4 +1,4 @@
-// Optional bridge between Project AA and the operator's ordinary Chrome.
+// Optional bridge between Hermit and the operator's ordinary Chrome.
 // It performs only search-result collection and page reads. It has no posting,
 // messaging, cookie-export, typing, or form-submission route.
 const HOME = "http://127.0.0.1:7717";
@@ -14,7 +14,7 @@ async function browserSession() {
   });
   const body = await response.json().catch(() => null);
   if (!response.ok || !body?.token) {
-    throw new Error(body?.note || `Project AA is not answering (${response.status})`);
+    throw new Error(body?.note || `Hermit is not answering (${response.status})`);
   }
   browserSessionToken = body.token;
   return browserSessionToken;
@@ -32,7 +32,7 @@ async function browserRequest(path, options = {}) {
   });
   const body = await response.json().catch(() => null);
   if (response.status === 403) browserSessionToken = null;
-  if (!response.ok) throw new Error(body?.note || `Project AA returned ${response.status}`);
+  if (!response.ok) throw new Error(body?.note || `Hermit returned ${response.status}`);
   return body;
 }
 

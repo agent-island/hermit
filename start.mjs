@@ -12,9 +12,9 @@ import { Observer, startPanel } from "./panel.mjs";
 import { archiveLife } from "./archive.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const root = process.env.AMI_DATA || path.join(here, "data");
+const root = process.env.HERMIT_DATA || path.join(here, "data");
 const workspace = path.join(root, "workspace");
-const port = Number(process.env.AMI_PORT || 7717);
+const port = Number(process.env.HERMIT_PORT || 7717);
 
 await mkdir(workspace, { recursive: true });
 
@@ -35,9 +35,9 @@ function preserveStoppedLife(reason) {
     );
     if (!latest || latest <= archivedThrough) return null;
     const saved = await archiveLife(log, {
-      archiveDir: process.env.AMI_ARCHIVE_DIR || path.join(here, "archive"),
+      archiveDir: process.env.HERMIT_ARCHIVE_DIR || path.join(here, "archive"),
       reason,
-      label: process.env.AMI_ARCHIVE_LABEL || path.basename(root),
+      label: process.env.HERMIT_ARCHIVE_LABEL || path.basename(root),
     });
     archivedThrough = latest;
     if (saved) {
@@ -82,9 +82,9 @@ const body = new Body({
 // Text goes in on stdin rather
 // than as an argument: no escaping, no length limit, nothing of hers mangled
 // on the way to being heard.
-const voice = process.env.AMI_VOICE || "Ava (Premium)";
-const rate = process.env.AMI_SAY_RATE || "";
-let voiceEnabled = process.env.AMI_SAY !== "0";
+const voice = process.env.HERMIT_VOICE || "Ava (Premium)";
+const rate = process.env.HERMIT_SAY_RATE || "";
+let voiceEnabled = process.env.HERMIT_SAY !== "0";
 let saying = null;
 const speechQueue = [];
 function aloud(text) {
@@ -94,9 +94,9 @@ function aloud(text) {
 }
 
 async function sendToOtherLife(text) {
-  const peerUrl = String(process.env.AMI_PEER_URL || "").replace(/\/$/, "");
-  const token = String(process.env.AMI_PEER_TOKEN || "");
-  const from = String(process.env.AMI_SELF_NAME || "other");
+  const peerUrl = String(process.env.HERMIT_PEER_URL || "").replace(/\/$/, "");
+  const token = String(process.env.HERMIT_PEER_TOKEN || "");
+  const from = String(process.env.HERMIT_SELF_NAME || "other");
   if (!peerUrl || !token) throw new Error("there is no other living agent to hear the words");
   const response = await fetch(`${peerUrl}/peer-say`, {
     method: "POST",
@@ -110,7 +110,7 @@ async function sendToOtherLife(text) {
   if (!response.ok) throw new Error(`the other living agent did not receive the words (${response.status})`);
   const receipt = await response.json();
   if (!receipt?.ok) throw new Error("the other living agent did not receive the words");
-  return { receivedBy: String(receipt.receivedBy || process.env.AMI_PEER_NAME || "the other living agent") };
+  return { receivedBy: String(receipt.receivedBy || process.env.HERMIT_PEER_NAME || "the other living agent") };
 }
 
 // Audible speech is optional host output, not part of her causal record.
@@ -181,20 +181,20 @@ startPanel({
   preserveLife: preserveStoppedLife,
 });
 
-process.stdout.write(`Project AA — Autonomous Agent\n\n`);
+process.stdout.write(`Hermit — Autonomous Agent\n\n`);
 process.stdout.write(`observer  http://127.0.0.1:${port}\n`);
 process.stdout.write(`model     ${config.model}\n`);
 process.stdout.write(`arrival   ${config.endpoint}${config.prefill ? ` (${config.prefill})` : ""}\n`);
 process.stdout.write(`context   ${config.contextTokens.toLocaleString("en-US")} tokens\n`);
 process.stdout.write(`run       ${describeRun(loadRun(log))}\n`);
-process.stdout.write(`voice     ${voiceEnabled ? voice : "off (AMI_SAY=0)"}\n`);
+process.stdout.write(`voice     ${voiceEnabled ? voice : "off (HERMIT_SAY=0)"}\n`);
 process.stdout.write(`data      ${root}\n`);
 process.stdout.write(`moments   ${log.count() === 0 ? "none yet — this is the first" : log.count() + " events recorded"}\n\n`);
 
 // Maintenance can restart the observer without accidentally creating another
 // moment. This is especially important while a frozen record is being
 // broadcast: the SQLite record and its derived queue must stay identical.
-if (process.env.AMI_START_PAUSED === "1") {
+if (process.env.HERMIT_START_PAUSED === "1") {
   process.stdout.write("life      paused on start\n");
 } else {
   loop.start();

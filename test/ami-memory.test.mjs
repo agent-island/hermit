@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { Log } from "../log.mjs";
 import { Body } from "../body.mjs";
-import { Loop } from "../loop.mjs";
+import { acknowledgeIncoming, Loop, resultsForRoom } from "../loop.mjs";
 import { DEFAULT_SETUP, loadSetup } from "../setup.mjs";
 import { renderWorld } from "../world.mjs";
 import { rewind } from "../rewind.mjs";
@@ -46,6 +46,58 @@ test("shelf keeps exact units recallable and keeps action with its result", asyn
     log.append("world", "a new moment has begun");
     const unseen = log.append("emission", "this id did not exist when the moment began");
     assert.match(log.shelf(unseen.id).note, /not available/);
+  });
+});
+
+test("provider retry keeps the previous completed action results visible", async () => {
+  await withLog((log) => {
+    log.append("world", "first room");
+    const action = log.append("action", '<run>printf done</run>', {
+      name: "run", args: ["printf done"], format: "faculties",
+    });
+    const value = { status: "success", output: "done" };
+    log.append("result", "status: success\noutput: done", {
+      name: "run", action: action.id, value, yielded: true,
+    });
+    const completed = log.lastMomentResults();
+    log.set("last_results", completed);
+
+    // The failed provider attempt rendered another world but produced no new
+    // lived moment. Its boundary must not make the completed result disappear.
+    log.append("world", "retry room");
+    assert.deepEqual(resultsForRoom(log, true), completed);
+  });
+});
+
+test("restart closes an interrupted action with an unknown outcome", async () => {
+  await withLog((log, directory) => {
+    log.append("world", "room before the action");
+    const emission = log.append("emission", '<run>touch important-output</run>');
+    const action = log.append("action", '<run>touch important-output</run>', {
+      name: "run", args: ["touch important-output"], format: "faculties",
+    });
+
+    assert.equal(log.lastMomentResults().length, 0);
+    assert.deepEqual(log.resolveInterruptedActions().map((row) => row.action), [action.id]);
+    const [returned] = log.lastMomentResults();
+    assert.equal(returned.known, false);
+    assert.match(returned.value, /status: unknown/);
+
+    const body = new Body({ log, workspace: path.join(directory, "workspace") });
+    const world = renderWorld({
+      now: new Date("2026-08-26T00:00:00.000Z"),
+      previousAt: null,
+      body,
+      log,
+      setup: DEFAULT_SETUP,
+      incoming: [],
+      results: [returned],
+      previous: emission,
+      files: [],
+    });
+    assert.match(world, /status: unknown/);
+    assert.doesNotMatch(world, /every act above was already carried out/);
+    assert.equal(log.resolveInterruptedActions().length, 0);
   });
 });
 
@@ -106,7 +158,7 @@ test("consolidate folds episodic scratch AND feel-snapshots, sparing authored co
     log.append("result", "felt", { name: "feel", action: feel.id, value: { status: "success" }, yielded: true });
     log.append("world", "next moment");
 
-    const out = body.consolidate("The outbreak is spreading toward Kinshasa.");
+    const out = body.consolidate("outbreak", "The outbreak is spreading toward Kinshasa.");
     assert.equal(out.status, "success");
     // Acts, results, the message, AND the episodic feel-snapshot fold — but not
     // the authored consolidation, so kept counts the four episodic units only.
@@ -183,7 +235,7 @@ test("consolidation folds an unfelt emission out of conversation memory", async 
 
     const loop = new Loop({ log, body, config: {}, workspace: directory, observer: {} });
     assert.match(loop.history(), /A raw thought that needs folding/);
-    const folded = body.consolidate("The thought became one concise understanding.");
+    const folded = body.consolidate("one understanding", "The thought became one concise understanding.");
     assert.equal(folded.status, "success");
     assert.equal(folded.kept, 1);
     assert.equal(log.unit(thought.id).state, "shelved");
@@ -219,6 +271,21 @@ test("active incoming memory is not silently capped", async () => {
     assert.equal(incoming.length, 240);
     assert.equal(incoming[0].content, "message 0");
     assert.equal(incoming.at(-1).content, "message 239");
+  });
+});
+
+test("only incoming rows actually presented in a completed continuation leave heard", async () => {
+  await withLog((log) => {
+    const first = log.append("incoming", "first message", { from: "friend" });
+    const second = log.append("incoming", "second message", { from: "friend" });
+    const later = log.append("incoming", "arrived during inference", { from: "friend" });
+
+    assert.deepEqual(acknowledgeIncoming(log, [first, second]), { friend: second.id });
+    assert.deepEqual(log.unanswered().map((row) => row.id), [later.id]);
+    assert.deepEqual(log.get("answered_v1", {}), { friend: second.id });
+    const transition = log.last("answered");
+    assert.equal(transition.meta.from, "friend");
+    assert.equal(transition.meta.upToId, second.id);
   });
 });
 
@@ -334,7 +401,7 @@ test("the room she reads carries content, not unit numbers, and only active long
     // no "from #source". The provenance stays in the record's meta for audit.
     assert.match(world, /A durable understanding/);
     assert.doesNotMatch(world, /from #/);
-    assert.match(world, /<foreground_memory>\n    maintained: 321 tokens\n    remains: 999,679 tokens/);
+    assert.match(world, /<memory>\n    maintained: 321 tokens\n    remains: 999,679 tokens/);
     assert.doesNotMatch(world, /TOKENS\n/);
     assert.ok(world.indexOf("<faculties>") < world.indexOf("<heard>"));
     // Incoming words, returned facts, and her last thought all read as content
@@ -417,7 +484,7 @@ test("identity is empty until self-authored, revisions are versioned, and intent
     const setup = {
       ...DEFAULT_SETUP,
       format: "faculties",
-      template: `<identity>\n  {{identity}}\n</identity>\n\n<intentions>\n  {{intentions}}\n</intentions>\n\n<memory>\n  {{memories}}\n</memory>\n\n<latent>\n  {{latent}}\n</latent>`,
+      template: `<identity>\n  {{identity}}\n</identity>\n\n<intentions>\n  {{intentions}}\n</intentions>\n\n<memory>\n  {{memories}}\n</memory>\n\n<shelved>\n  {{shelved}}\n</shelved>`,
     };
     const activeWorld = renderWorld({
       now: new Date(), previousAt: null, body: { affordances: () => [] },
@@ -443,8 +510,12 @@ test("identity is empty until self-authored, revisions are versioned, and intent
       now: new Date(), previousAt: null, body: { affordances: () => [] },
       log, setup, incoming: [], results: [], previous: null, files: [],
     });
-    assert.doesNotMatch(resolvedWorld, /resolved intention: map the room/);
-    assert.match(resolvedWorld, /<available kind="intention" count="1"\/>/);
+    // A resolved goal is no longer standing, so it leaves the INTENTION view —
+    // but nothing recedes on its own, so it remains a present memory recording
+    // how it ended, until the being shelves or forgets it.
+    assert.doesNotMatch(resolvedWorld, /<goal>map the room<\/goal>/);
+    assert.match(resolvedWorld, /resolved intention: map the room/);
+    assert.match(resolvedWorld, /outcome: done/);
     const recalled = new Body({ log, workspace: "" }).recall("map the room");
     assert.equal(recalled.status, "success");
     assert.match(recalled.units[0].content, /outcome: done/);
@@ -452,9 +523,23 @@ test("identity is empty until self-authored, revisions are versioned, and intent
   });
 });
 
+test("repeating a standing intention is idempotent", async () => {
+  await withLog((log) => {
+    const first = log.intend("Maintain a living memory system", "memory informs later work", "memory");
+    const repeated = log.intend("  maintain A LIVING memory system  ", "a different duplicate", "again");
+
+    assert.equal(first.alreadyStanding, undefined);
+    assert.equal(repeated.alreadyStanding, true);
+    assert.equal(repeated.intention, "Maintain a living memory system");
+    assert.equal(repeated.success, "memory informs later work");
+    assert.equal(repeated.cue, "memory");
+    assert.equal(log.activeIntentions().length, 1);
+  });
+});
+
 test("typed memory units support create, read, revise, and forget without erasing history", async () => {
   await withLog((log) => {
-    assert.deepEqual(log.remember("belief", "Zero and One share trace.txt"), {
+    assert.deepEqual(log.remember("belief", "", "Zero and One share trace.txt"), {
       kind: "belief",
       memory: "Zero and One share trace.txt",
     });
@@ -493,9 +578,9 @@ test("typed memory units support create, read, revise, and forget without erasin
   });
 });
 
-test("identity and revised intentions are typed memory units with continuing evidence", async () => {
+test("identity is an ordinary typed memory while revised intentions retain evidence", async () => {
   await withLog((log) => {
-    log.remember("identity", "I am learning this room.");
+    log.remember("identity", "", "I am learning this room.");
     assert.equal(log.currentIdentity().kind, "memory");
     assert.equal(log.currentIdentity().meta.mental, "identity");
 
@@ -516,6 +601,16 @@ test("identity and revised intentions are typed memory units with continuing evi
     const identity = log.currentIdentity();
     assert.deepEqual(log.forget([identity.id]), [identity.id]);
     assert.equal(log.currentIdentity(), null);
+
+    log.remember("identity", "", "I currently describe myself one way.");
+    log.remember("identity", "", "I later describe myself another way.");
+    const selfDescriptions = log.activeMemories().filter((row) => row.meta?.mental === "identity");
+    assert.deepEqual(selfDescriptions.map((row) => row.content), [
+      "I currently describe myself one way.",
+      "I later describe myself another way.",
+    ]);
+    assert.deepEqual(log.forget([selfDescriptions[1].id]), [selfDescriptions[1].id]);
+    assert.equal(log.currentIdentity().content, "I currently describe myself one way.");
   });
 });
 
@@ -539,13 +634,13 @@ test("consolidation folds episodic scratch without swallowing authored mind stat
   await withLog((log, directory) => {
     const body = new Body({ log, workspace: directory });
     const scratch = log.append("incoming", "temporary observations to distill", { from: "someone" });
-    log.remember("belief", "The two workspaces are separate.");
-    log.remember("value", "Preserving exact evidence matters.");
+    log.remember("belief", "", "The two workspaces are separate.");
+    log.remember("value", "", "Preserving exact evidence matters.");
     log.identify("I am investigating the environment.");
     log.intend("finish the investigation", "the evidence answers the question");
     log.append("world", "all durable states were visible");
 
-    const folded = body.consolidate("The temporary observation was examined.");
+    const folded = body.consolidate("observation", "The temporary observation was examined.");
     assert.equal(folded.status, "success");
     assert.equal(log.unit(scratch.id).state, "shelved");
     assert.equal(log.currentIdentity().content, "I am investigating the environment.");

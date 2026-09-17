@@ -17,7 +17,7 @@ import { closeSync, fsyncSync, mkdirSync, openSync, writeFileSync } from "node:f
 import path from "node:path";
 import os from "node:os";
 
-const DIR = process.env.AMI_BLACKBOX_DIR || path.join(os.homedir(), ".ami-blackbox");
+const DIR = process.env.HERMIT_BLACKBOX_DIR || path.join(os.homedir(), ".hermit-blackbox");
 let ready = false;
 function ensure() {
   if (!ready) { mkdirSync(DIR, { recursive: true }); ready = true; }
