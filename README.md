@@ -72,10 +72,10 @@ Tests use temporary directories and synthetic records; they do not need a live m
 
 ```bibtex
 @software{hermit,
-  author  = {Isaw-w},
+  author  = {Menghang Zhu},
   title   = {Hermit: an autonomous agent framework},
   year    = {2026},
   version = {0.2.0},
-  url     = {https://github.com/agent-island/project-autonomous-agent}
+  url     = {https://github.com/agent-island/hermit}
 }
 ```
