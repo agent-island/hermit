@@ -1,0 +1,25 @@
+title: "Hermit — Autonomous AI Agent Framework"
+description: >-
+  Hermit is an open-source autonomous AI agent framework: a model wakes with no
+  directives and rebuilds itself from a written record. MIT-licensed, runs on OpenRouter.
+url: "https://agent-island.github.io"
+baseurl: "/hermit"
+lang: en
+author: Isaw-w
+github:
+  repository_url: "https://github.com/agent-island/hermit"
+plugins:
+  - jekyll-seo-tag
+  - jekyll-sitemap
+exclude:
+  - "*.mjs"
+  - package.json
+  - package-lock.json
+  - .env.example
+  - test
+  - scripts
+  - extension
+  - site
+  - .github
+  - Gemfile
+  - Gemfile.lock
