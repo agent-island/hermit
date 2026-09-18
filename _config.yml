@@ -8,7 +8,6 @@ author: "Menghang Zhu"
 github:
   repository_url: "https://github.com/agent-island/hermit"
 plugins:
-  - jekyll-seo-tag
   - jekyll-sitemap
 exclude:
   - "*.mjs"
